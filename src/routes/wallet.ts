@@ -10,6 +10,8 @@ import BIP32Factory from "bip32";
 import * as ecc from "tiny-secp256k1";
 import * as bitcoin from "bitcoinjs-lib";
 import bs58 from "bs58";
+import { createHash } from "crypto";
+import { deriveMoneroKeys } from "../chains/monero.js";
 
 const bip32 = BIP32Factory(ecc);
 
@@ -45,6 +47,23 @@ wallet.post("/create", async (c) => {
   });
   addresses.bitcoin = btcAddress!;
 
+  // Tron — same BIP32 root, path m/44'/195'/0'/0/0, Ethereum-style key, base58check encoded
+  const tronChild = ethRoot.derivePath("m/44'/195'/0'/0/0");
+  const tronEthWallet = new ethers.Wallet(
+    Buffer.from(tronChild.privateKey!).toString("hex")
+  );
+  const tronAddrBytes = Buffer.from(tronEthWallet.address.slice(2), "hex");
+  const tronPayload = Buffer.concat([Buffer.from([0x41]), tronAddrBytes]);
+  const tronChecksum = createHash("sha256")
+    .update(createHash("sha256").update(tronPayload).digest())
+    .digest()
+    .slice(0, 4);
+  addresses.tron = bs58.encode(Buffer.concat([tronPayload, tronChecksum]));
+
+  // Monero (XMR) — HMAC-SHA512 from seed, Ed25519 keys, Monero base58
+  const xmrKeys = deriveMoneroKeys(Uint8Array.from(seed));
+  addresses.monero = xmrKeys.address;
+
   return c.json({
     mnemonic,
     addresses,
@@ -54,6 +73,8 @@ wallet.post("/create", async (c) => {
       base: "m/44'/60'/0'/0/0 (same as ethereum)",
       solana: "m/44'/501'/0'/0'",
       bitcoin: "m/84'/0'/0'/0/0 (native segwit)",
+      tron: "m/44'/195'/0'/0/0 (base58check, supports USDT TRC-20)",
+      monero: "HMAC-SHA512('monero seed', bip39_seed) → Ed25519 keys",
     },
   }, 201);
 });
@@ -72,11 +93,34 @@ wallet.get("/balance/:address", async (c) => {
   }
 
   if (chain === "bitcoin") {
-    return c.json({
-      error: "not_implemented",
-      message: "Bitcoin balance lookup requires a block explorer API. Use a Bitcoin explorer directly.",
-      explorer: `https://mempool.space/address/${address}`,
-    }, 501);
+    try {
+      const res = await fetch(`https://mempool.space/api/address/${address}`);
+      if (!res.ok) {
+        return c.json({ error: "api_error", message: `mempool.space returned ${res.status}` }, 502);
+      }
+      const data = await res.json() as any;
+      const confirmedSats =
+        (data.chain_stats?.funded_txo_sum ?? 0) - (data.chain_stats?.spent_txo_sum ?? 0);
+      const unconfirmedSats =
+        (data.mempool_stats?.funded_txo_sum ?? 0) - (data.mempool_stats?.spent_txo_sum ?? 0);
+      const totalSats = confirmedSats + unconfirmedSats;
+      return c.json({
+        address,
+        chain,
+        balance: {
+          native: {
+            symbol: "BTC",
+            amount: (totalSats / 1e8).toString(),
+            confirmed_satoshis: confirmedSats,
+            unconfirmed_satoshis: unconfirmedSats,
+            total_satoshis: totalSats,
+          },
+        },
+        explorer: `https://mempool.space/address/${address}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "api_error", message: err.message }, 502);
+    }
   }
 
   if (chain === "solana") {

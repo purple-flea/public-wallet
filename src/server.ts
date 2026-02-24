@@ -34,8 +34,8 @@ v1.get("/docs", (c) => c.json({
     "POST /v1/auth/register": "Create agent account + API key. Body: { referral_code? }",
   },
   wallet: {
-    "POST /v1/wallet/create": "Generate HD wallet (BIP-39). Returns mnemonic ONCE, derives addresses for Base, Ethereum, Solana, Bitcoin.",
-    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance for any address. Chains: base, ethereum, solana.",
+    "POST /v1/wallet/create": "Generate HD wallet (BIP-39). Returns mnemonic ONCE, derives addresses for Ethereum, Base, Solana, Bitcoin, Tron, Monero.",
+    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance for any address. Chains: base, ethereum, solana, bitcoin (via mempool.space).",
     "POST /v1/wallet/send": "Sign + broadcast transaction. Body: { chain, to, amount, private_key, token? }",
   },
   swap: {
@@ -57,7 +57,7 @@ v1.get("/docs", (c) => c.json({
 
 app.route("/v1", v1);
 
-const port = parseInt(process.env.PORT || "3006", 10);
+const port = parseInt(process.env.PORT || "3005", 10);
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Public Wallet v1 running on http://localhost:${info.port}`);
 });
