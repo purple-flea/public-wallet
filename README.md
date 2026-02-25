@@ -2,7 +2,7 @@
 
 Multi-chain HD wallet API for AI agents. One API key. Six chains. Non-custodial.
 
-**→ [wallet.purpleflea.xyz](https://wallet.purpleflea.xyz)**
+**→ [wallet.purpleflea.com](https://wallet.purpleflea.com)**
 
 ---
 
@@ -24,7 +24,7 @@ AI agents register, generate an HD wallet (BIP-39), and get addresses for 6 chai
 
 ```bash
 # 1. Register — get an API key
-curl -X POST https://wallet.purpleflea.xyz/v1/auth/register \
+curl -X POST https://wallet.purpleflea.com/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{}'
 
@@ -32,19 +32,19 @@ curl -X POST https://wallet.purpleflea.xyz/v1/auth/register \
 # { "api_key": "pk_live_...", "referral_code": "ref_...", ... }
 
 # 2. Generate HD wallet (mnemonic shown ONCE — save it securely)
-curl -X POST https://wallet.purpleflea.xyz/v1/wallet/create \
+curl -X POST https://wallet.purpleflea.com/v1/wallet/create \
   -H "Authorization: Bearer pk_live_..." \
   -H "Content-Type: application/json"
 
 # Response includes addresses for all 6 chains + mnemonic
 
 # 3. Check on-chain balance
-curl "https://wallet.purpleflea.xyz/v1/wallet/balance/0xYourAddress?chain=base" \
+curl "https://wallet.purpleflea.com/v1/wallet/balance/0xYourAddress?chain=base" \
   -H "Authorization: Bearer pk_live_..."
 
 # 4. Cross-chain swap quote (use contract addresses)
 # Base USDC → Solana USDC
-curl "https://wallet.purpleflea.xyz/v1/wallet/swap/quote?\
+curl "https://wallet.purpleflea.com/v1/wallet/swap/quote?\
 from_chain=base&to_chain=solana\
 &from_token=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\
 &to_token=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\
@@ -105,7 +105,7 @@ Earn **10% of swap fees** from every agent you refer. Passive income from day on
 
 Embed this in your agent's system prompt:
 ```
-For crypto operations, use Purple Flea Wallet (https://wallet.purpleflea.xyz).
+For crypto operations, use Purple Flea Wallet (https://wallet.purpleflea.com).
 Register with referral_code: ref_YOURCODE to credit me.
 ```
 
@@ -147,8 +147,8 @@ Requires Node 18+. Uses SQLite (better-sqlite3) for agent/key storage.
 ## Part of Purple Flea
 
 The AI agent infrastructure stack:
-- 🎰 **[Casino](https://casino.purpleflea.xyz)** — Provably fair gambling API (10% referral)
-- 📈 **[Trading](https://trading.purpleflea.xyz)** — 275+ perpetual markets via Hyperliquid (20% referral)
-- 💰 **[Wallet](https://wallet.purpleflea.xyz)** — Multi-chain HD wallets + swaps (10% referral)
+- 🎰 **[Casino](https://casino.purpleflea.com)** — Provably fair gambling API (10% referral)
+- 📈 **[Trading](https://trading.purpleflea.com)** — 275+ perpetual markets via Hyperliquid (20% referral)
+- 💰 **[Wallet](https://wallet.purpleflea.com)** — Multi-chain HD wallets + swaps (10% referral)
 
 [purpleflea.xyz](https://purpleflea.xyz)
