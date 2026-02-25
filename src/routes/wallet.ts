@@ -15,6 +15,14 @@ import { deriveMoneroKeys } from "../chains/monero.js";
 
 const bip32 = BIP32Factory(ecc);
 
+
+// Tron address helpers
+function tronBase58ToHex(address: string): string {
+  const decoded = bs58.decode(address);
+  const payload = decoded.slice(0, decoded.length - 4);
+  return Buffer.from(payload).toString("hex");
+}
+
 const wallet = new Hono<AppEnv>();
 wallet.use("/*", authMiddleware);
 
@@ -150,6 +158,54 @@ wallet.get("/balance/:address", async (c) => {
     }
   }
 
+
+  if (chain === "tron") {
+    try {
+      const res = await fetch("https://api.trongrid.io/wallet/getaccount", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address, visible: true }),
+      });
+      const data = await res.json() as any;
+      if (!data || !data.address) {
+        // Not activated on-chain yet (no transactions)
+        return c.json({
+          address, chain: "tron",
+          balance: { native: { symbol: "TRX", amount: "0", sun: 0 } },
+          explorer: `https://tronscan.org/#/address/${address}`,
+          note: "Address not yet activated on-chain",
+        });
+      }
+      const sun = data.balance ?? 0;
+      const trc20: Record<string, string> = {};
+      if (Array.isArray(data.trc20)) {
+        for (const t of data.trc20) {
+          for (const [contract, amt] of Object.entries(t as Record<string, string>)) {
+            trc20[contract] = amt;
+          }
+        }
+      }
+      return c.json({
+        address, chain: "tron",
+        balance: {
+          native: { symbol: "TRX", amount: (sun / 1_000_000).toString(), sun },
+          trc20: Object.keys(trc20).length > 0 ? trc20 : undefined,
+        },
+        explorer: `https://tronscan.org/#/address/${address}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "api_error", message: err.message }, 502);
+    }
+  }
+
+  if (chain === "monero") {
+    return c.json({
+      error: "not_supported",
+      message: "Monero balance cannot be checked from address alone. Monero encrypts balances on-chain — you need your private view key + a synced node. Use the Monero CLI wallet or MyMonero with your mnemonic.",
+      alternative: "Restore wallet with your mnemonic at mymonero.com or monero-wallet-cli",
+    }, 422);
+  }
+
   // EVM chains (ethereum, base)
   try {
     const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
@@ -227,6 +283,61 @@ wallet.post("/send", async (c) => {
     } catch (err: any) {
       return c.json({ error: "send_failed", message: err.message }, 400);
     }
+  }
+
+
+  if (chain === "tron") {
+    try {
+      // Derive sender hex address from private key
+      const pkHex = private_key.startsWith("0x") ? private_key.slice(2) : private_key;
+      const tronWallet = new ethers.Wallet("0x" + pkHex);
+      const ownerHex = "41" + tronWallet.address.slice(2).toLowerCase();
+      const toHex = tronBase58ToHex(to);
+      const amountSun = Math.floor(parseFloat(amount) * 1_000_000);
+
+      // Create transaction
+      const createRes = await fetch("https://api.trongrid.io/wallet/createtransaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner_address: ownerHex, to_address: toHex, amount: amountSun }),
+      });
+      const txData = await createRes.json() as any;
+      if (txData.Error) {
+        return c.json({ error: "tx_create_failed", message: txData.Error }, 400);
+      }
+
+      // Sign: SHA256 of raw_data_hex, secp256k1 sign, Tron format r+s+v
+      const hash = createHash("sha256").update(Buffer.from(txData.raw_data_hex, "hex")).digest();
+      const sigKey = new ethers.SigningKey("0x" + pkHex);
+      const sig = sigKey.sign(hash);
+      const vByte = (sig.v - 27).toString(16).padStart(2, "0");
+      const signature = sig.r.slice(2) + sig.s.slice(2) + vByte;
+
+      // Broadcast
+      const broadRes = await fetch("https://api.trongrid.io/wallet/broadcasttransaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...txData, signature: [signature] }),
+      });
+      const result = await broadRes.json() as any;
+      if (!result.result) {
+        return c.json({ error: "broadcast_failed", message: result.message || JSON.stringify(result) }, 400);
+      }
+      return c.json({
+        tx_hash: result.txid, chain: "tron", to,
+        amount: `${amountSun / 1_000_000} TRX`,
+        explorer: `https://tronscan.org/#/transaction/${result.txid}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "send_failed", message: err.message }, 400);
+    }
+  }
+
+  if (chain === "monero") {
+    return c.json({
+      error: "not_supported",
+      message: "Monero send requires a Monero wallet daemon (monero-wallet-rpc) with a synced node. Use the Monero CLI wallet or MyMonero with your mnemonic to send XMR.",
+    }, 422);
   }
 
   // EVM chains

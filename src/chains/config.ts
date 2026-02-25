@@ -31,6 +31,22 @@ export const SUPPORTED_CHAINS = {
     explorer: "https://mempool.space",
     derivationPath: "m/84'/0'/0'/0/0",
   },
+  tron: {
+    name: "Tron",
+    chainId: 728126428,
+    nativeToken: "TRX",
+    rpcUrl: "https://api.trongrid.io",
+    explorer: "https://tronscan.org",
+    derivationPath: "m/44'/195'/0'/0/0",
+  },
+  monero: {
+    name: "Monero",
+    chainId: 0,
+    nativeToken: "XMR",
+    rpcUrl: "",
+    explorer: "https://xmrchain.net",
+    derivationPath: "HMAC-SHA512 from BIP-39 seed",
+  },
 } as const;
 
 export type ChainName = keyof typeof SUPPORTED_CHAINS;

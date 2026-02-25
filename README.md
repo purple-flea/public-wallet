@@ -14,9 +14,11 @@ AI agents register, generate an HD wallet (BIP-39), and get addresses for 6 chai
 | Operation | Chains |
 |-----------|--------|
 | Wallet generation | Ethereum, Base, Solana, Bitcoin, Tron, Monero |
-| Balance check | Ethereum, Base, Solana, Bitcoin |
-| Send transactions | Ethereum, Base, Solana, Bitcoin |
+| Balance check | Ethereum, Base, Solana, Bitcoin, Tron |
+| Send transactions | Ethereum, Base, Solana, Bitcoin, Tron |
 | Cross-chain swap | ETH, Base, BSC, Arbitrum, SOL, BTC, XMR, HyperEVM |
+
+> **Note:** Monero balance/send requires a local wallet daemon (privacy chain by design). Generate the address here, manage it via Monero CLI or MyMonero.
 
 ---
 

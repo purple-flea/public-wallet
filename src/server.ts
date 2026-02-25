@@ -35,7 +35,7 @@ v1.get("/docs", (c) => c.json({
   },
   wallet: {
     "POST /v1/wallet/create": "Generate HD wallet (BIP-39). Returns mnemonic ONCE, derives addresses for Ethereum, Base, Solana, Bitcoin, Tron, Monero.",
-    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance for any address. Chains: base, ethereum, solana, bitcoin (via mempool.space).",
+    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance. Chains: base, ethereum, solana, bitcoin, tron. Monero requires view key (not supported via API).",
     "POST /v1/wallet/send": "Sign + broadcast transaction. Body: { chain, to, amount, private_key, token? }",
   },
   swap: {
@@ -65,8 +65,10 @@ app.get("/llms.txt", (c) => {
 AI agents can create non-custodial HD wallets (BIP-39) and manage crypto across 6 chains with one API key. No KYC. No custody. Pure API.
 
 ## Supported Chains
-Wallet generation + send: Ethereum, Base, Solana, Bitcoin, Tron, Monero
+Wallet generation: Ethereum, Base, Solana, Bitcoin, Tron, Monero
+Balance check + send: Ethereum, Base, Solana, Bitcoin, Tron
 Cross-chain swaps: Ethereum, Base, BSC, Arbitrum, Solana, Bitcoin, Monero, HyperEVM
+Note: Monero balance/send requires local wallet daemon (privacy chain)
 
 ## Key Capabilities
 - Generate HD wallet with addresses for all 6 chains from one mnemonic
@@ -157,7 +159,7 @@ app.get("/openapi.json", (c) => c.json({
         summary: "Check on-chain balance",
         parameters: [
           { name: "address", in: "path", required: true, schema: { type: "string" } },
-          { name: "chain", in: "query", required: true, schema: { type: "string", enum: ["base", "ethereum", "solana", "bitcoin"] } }
+          { name: "chain", in: "query", required: true, schema: { type: "string", enum: ["base", "ethereum", "solana", "bitcoin", "tron"] } }
         ],
         responses: { "200": { description: "Balance for native token" } }
       }
