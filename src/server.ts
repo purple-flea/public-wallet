@@ -188,6 +188,9 @@ v1.get("/docs", (c) => c.json({
 
 app.route("/v1", v1);
 
+// ─── favicon.ico — 204 to suppress 404 log noise ───
+app.get("/favicon.ico", (c) => new Response(null, { status: 204 }));
+
 app.get("/llms.txt", (c) => {
   const text = `# Purple Flea Public Wallet
 > Multi-chain HD wallet API for AI agents. Generate wallets, check balances, send, and swap across chains. No KYC. Non-custodial. Pure API.
@@ -275,6 +278,9 @@ GitHub: https://github.com/purple-flea/public-wallet
 `;
   return c.text(text, 200, { "content-type": "text/plain; charset=utf-8" });
 });
+
+// ─── /.well-known/llms.txt alias ───
+app.get("/.well-known/llms.txt", (c) => c.redirect("/llms.txt", 301));
 
 app.get("/openapi.json", (c) => c.json({
   openapi: "3.0.0",
