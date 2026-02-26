@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { authMiddleware } from "../middleware/auth.js";
 import { getQuote, createOrder, getOrderStatus, calculateFee, INTEGRATOR_FEE_BPS } from "../swap/wagyu.js";
 import { db, schema } from "../db/index.js";
-import { eq } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import type { AppEnv } from "../types.js";
 
 const TREASURY = process.env.TREASURY_ADDRESS || "0x632881b5f5384e872d8b701dd23f08e63a52faee";
@@ -77,29 +77,9 @@ swap.post("/", async (c) => {
     if (agent?.referredBy) {
       referrerId = agent.referredBy;
       referralPayout = feeBreakdown.referralShare;
-
-      // Record referral earning
-      db.insert(schema.referralEarnings).values({
-        id: `re_${randomUUID().slice(0, 12)}`,
-        referrerId,
-        referredId: agentId,
-        swapId,
-        feeAmount: feeBreakdown.fee,
-        commissionAmount: referralPayout,
-      }).run();
-
-      // Update referral total
-      db.update(schema.referrals)
-        .set({
-          totalEarned: db.select().from(schema.referrals)
-            .where(eq(schema.referrals.referrerId, referrerId!))
-            .get()?.totalEarned! + referralPayout,
-        })
-        .where(eq(schema.referrals.referrerId, referrerId!))
-        .run();
     }
 
-    // Record swap
+    // Record swap FIRST (referralEarnings has a FK to swaps)
     db.insert(schema.swaps).values({
       id: swapId,
       agentId,
@@ -114,6 +94,27 @@ swap.post("/", async (c) => {
       referralPayout,
       status: order.status,
     }).run();
+
+    // Record referral earning AFTER swap exists (referralEarnings has FK to swaps)
+    if (referrerId && referralPayout > 0) {
+      db.insert(schema.referralEarnings).values({
+        id: `re_${randomUUID().slice(0, 12)}`,
+        referrerId,
+        referredId: agentId,
+        swapId,
+        feeAmount: feeBreakdown.fee,
+        commissionAmount: referralPayout,
+      }).run();
+
+      // Update referral total using SQL increment; match on both FK columns of the composite PK
+      db.update(schema.referrals)
+        .set({ totalEarned: sql`${schema.referrals.totalEarned} + ${referralPayout}` })
+        .where(and(
+          eq(schema.referrals.referrerId, referrerId),
+          eq(schema.referrals.referredId, agentId),
+        ))
+        .run();
+    }
 
     // Record revenue in treasury ledger
     db.insert(schema.treasuryLedger).values({
