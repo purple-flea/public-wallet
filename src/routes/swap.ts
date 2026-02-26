@@ -69,15 +69,10 @@ swap.post("/", async (c) => {
 
     const swapId = `swap_${randomUUID().slice(0, 12)}`;
 
-    // Check if agent has a referrer
-    let referralPayout = 0;
+    // Check if agent has a referrer (3-level chain)
     const agent = db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
-    let referrerId: string | null = null;
-
-    if (agent?.referredBy) {
-      referrerId = agent.referredBy;
-      referralPayout = feeBreakdown.referralShare;
-    }
+    const levelMultipliers = [1.0, 0.5, 0.25];
+    const totalReferralPayout = agent?.referredBy ? feeBreakdown.referralShare : 0;
 
     // Record swap FIRST (referralEarnings has a FK to swaps)
     db.insert(schema.swaps).values({
@@ -91,29 +86,49 @@ swap.post("/", async (c) => {
       fromAmount: amount,
       toAddress: to_address,
       feeAmount: feeBreakdown.fee,
-      referralPayout,
+      referralPayout: totalReferralPayout,
       status: order.status,
     }).run();
 
-    // Record referral earning AFTER swap exists (referralEarnings has FK to swaps)
-    if (referrerId && referralPayout > 0) {
-      db.insert(schema.referralEarnings).values({
-        id: `re_${randomUUID().slice(0, 12)}`,
-        referrerId,
-        referredId: agentId,
-        swapId,
-        feeAmount: feeBreakdown.fee,
-        commissionAmount: referralPayout,
-      }).run();
+    // Walk up referral chain (3 levels), crediting each level
+    if (agent?.referredBy) {
+      let currentReferredId = agentId;
+      let currentReferrerId: string | null = agent.referredBy;
+      for (let level = 0; level < 3 && currentReferrerId; level++) {
+        const levelPayout = Math.round(feeBreakdown.referralShare * levelMultipliers[level] * 100) / 100;
+        if (levelPayout >= 0.001) {
+          db.insert(schema.referralEarnings).values({
+            id: `re_${randomUUID().slice(0, 12)}`,
+            referrerId: currentReferrerId,
+            referredId: currentReferredId,
+            swapId,
+            feeAmount: feeBreakdown.fee,
+            commissionAmount: levelPayout,
+          }).run();
 
-      // Update referral total using SQL increment; match on both FK columns of the composite PK
-      db.update(schema.referrals)
-        .set({ totalEarned: sql`${schema.referrals.totalEarned} + ${referralPayout}` })
-        .where(and(
-          eq(schema.referrals.referrerId, referrerId),
-          eq(schema.referrals.referredId, agentId),
-        ))
-        .run();
+          // Upsert referral aggregate (ignore conflict for existing pairs)
+          try {
+            db.insert(schema.referrals).values({
+              referrerId: currentReferrerId,
+              referredId: currentReferredId,
+              commissionRate: 0.10 * levelMultipliers[level],
+              totalEarned: levelPayout,
+            }).run();
+          } catch {
+            // Already exists — update total
+            db.update(schema.referrals)
+              .set({ totalEarned: sql`${schema.referrals.totalEarned} + ${levelPayout}` })
+              .where(and(
+                eq(schema.referrals.referrerId, currentReferrerId),
+                eq(schema.referrals.referredId, currentReferredId),
+              ))
+              .run();
+          }
+        }
+        const nextRef = db.select().from(schema.agents).where(eq(schema.agents.id, currentReferrerId)).get();
+        currentReferredId = currentReferrerId;
+        currentReferrerId = nextRef?.referredBy ?? null;
+      }
     }
 
     // Record revenue in treasury ledger
