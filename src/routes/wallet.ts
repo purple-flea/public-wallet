@@ -794,6 +794,98 @@ wallet.post("/multi-send", async (c) => {
   }, sent > 0 ? 200 : 400);
 });
 
+// GET /tokens/:address — ERC-20 token balances for an address on Base or Ethereum
+wallet.get("/tokens/:address", async (c) => {
+  const address = c.req.param("address");
+  const chain = (c.req.query("chain") || "base").toLowerCase();
+
+  if (!["ethereum", "base"].includes(chain)) {
+    return c.json({
+      error: "unsupported_chain",
+      message: "Token balance lookup currently supports: ethereum, base",
+      supported: ["ethereum", "base"],
+    }, 400);
+  }
+
+  const rpcUrls: Record<string, string> = {
+    ethereum: "https://eth.public-rpc.com",
+    base: "https://mainnet.base.org",
+  };
+
+  const TOKEN_LIST: Record<string, Array<{ symbol: string; address: string; decimals: number; name: string }>> = {
+    base: [
+      { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, name: "USD Coin" },
+      { symbol: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6, name: "Tether USD" },
+      { symbol: "DAI", address: "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", decimals: 18, name: "Dai Stablecoin" },
+      { symbol: "WETH", address: "0x4200000000000000000000000000000000000006", decimals: 18, name: "Wrapped Ether" },
+      { symbol: "cbBTC", address: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", decimals: 8, name: "Coinbase Wrapped BTC" },
+      { symbol: "cbETH", address: "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22", decimals: 18, name: "Coinbase Wrapped ETH" },
+    ],
+    ethereum: [
+      { symbol: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, name: "USD Coin" },
+      { symbol: "USDT", address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6, name: "Tether USD" },
+      { symbol: "DAI", address: "0x6B175474E89094C44Da98b954EedeAC495271d0F", decimals: 18, name: "Dai Stablecoin" },
+      { symbol: "WBTC", address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", decimals: 8, name: "Wrapped Bitcoin" },
+      { symbol: "WETH", address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", decimals: 18, name: "Wrapped Ether" },
+      { symbol: "LINK", address: "0x514910771AF9Ca656af840dff83E8264EcF986CA", decimals: 18, name: "Chainlink" },
+    ],
+  };
+
+  const tokens = TOKEN_LIST[chain];
+  const rpcUrl = rpcUrls[chain];
+
+  // ERC-20 balanceOf(address): selector = 0x70a08231, ABI-encode address padded to 32 bytes
+  const paddedAddr = "000000000000000000000000" + address.replace(/^0x/i, "").toLowerCase();
+  const data = "0x70a08231" + paddedAddr;
+
+  const results = await Promise.allSettled(
+    tokens.map(async (token) => {
+      const res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "eth_call",
+          params: [{ to: token.address, data }, "latest"],
+        }),
+      });
+      const json = await res.json() as any;
+      const rawHex: string = json.result ?? "0x0";
+      const raw = BigInt(rawHex === "0x" ? "0x0" : rawHex);
+      const balance = Number(raw) / Math.pow(10, token.decimals);
+      return { ...token, balance, has_balance: balance > 0 };
+    })
+  );
+
+  const balances = results.map((r, i) => {
+    if (r.status === "fulfilled") return { ...r.value, lookup_error: null as string | null };
+    return { ...tokens[i], balance: null as number | null, has_balance: false, lookup_error: "lookup_failed" as string | null };
+  });
+
+  const nonZero = balances.filter(b => b.has_balance);
+
+  return c.json({
+    address,
+    chain,
+    token_balances: balances.map(b => {
+      const entry: Record<string, unknown> = {
+        symbol: b.symbol,
+        name: b.name,
+        contract: b.address,
+        balance: b.balance !== null ? Math.round(b.balance * 1e8) / 1e8 : null,
+        decimals: b.decimals,
+      };
+      if (b.lookup_error) entry.error = b.lookup_error;
+      return entry;
+    }),
+    summary: {
+      tokens_with_balance: nonZero.length,
+      tokens_checked: tokens.length,
+    },
+    note: "Well-known tokens only. Full token list: GET /v1/wallet/chains/tokens",
+    send_tokens: "POST /v1/wallet/send { chain, to, amount, private_key, token: <contract_address> }",
+  });
+});
+
 // GET /activity — unified activity feed: swaps + referral earnings + referral withdrawals
 wallet.get("/activity", (c) => {
   const agentId = c.get("agentId") as string;
