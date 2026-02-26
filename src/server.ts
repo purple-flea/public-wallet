@@ -147,6 +147,9 @@ v1.get("/public-stats", (c) => {
   });
 });
 
+// ─── /stats alias (no auth) — for economy dashboard ───
+v1.get("/stats", (c) => c.redirect("/v1/public-stats", 301));
+
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
   c.header("Cache-Control", "public, max-age=60");
