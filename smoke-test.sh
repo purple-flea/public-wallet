@@ -54,6 +54,8 @@ check GET /openapi.json "openapi spec"
 check GET /llms.txt "llms.txt"
 check GET /favicon.ico "favicon" "" 204
 check GET /ping "ping"
+check GET "/v1/price?symbol=BTC" "BTC price (public)"
+check GET "/v1/price?symbol=ETH" "ETH price (public)"
 
 echo ""
 echo "--- Auth endpoints return 401 without token ---"

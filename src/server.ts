@@ -197,6 +197,61 @@ v1.get("/docs", (c) => c.json({
 
 app.route("/v1", v1);
 
+// ─── Public price endpoint (no auth) — before /v1 route to be handled by app directly ───
+// NOTE: Registered AFTER v1 mount intentionally — v1/wallet/price (auth) takes priority for auth'd calls
+// This public version at /v1/price is for unauthenticated discovery
+app.get("/v1/price", async (c) => {
+  const symbol = (c.req.query("symbol") || "").toUpperCase().trim();
+
+  if (!symbol) {
+    return c.json({
+      error: "missing_symbol",
+      message: "Provide ?symbol=BTC (or ETH, SOL, USDC, etc.)",
+      examples: ["GET /v1/price?symbol=BTC", "GET /v1/price?symbol=ETH", "GET /v1/price?symbol=SOL"],
+      supported: ["BTC","ETH","SOL","BNB","XRP","DOGE","ADA","AVAX","DOT","MATIC","LINK","UNI","LTC","BCH","XLM","ATOM","USDC","USDT","DAI","TRX","XMR","SHIB","ARB","OP","TON","SUI","INJ","NEAR","ICP","ALGO"],
+    }, 400);
+  }
+
+  const cgIdMap: Record<string, string> = {
+    BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
+    XRP: "ripple", DOGE: "dogecoin", ADA: "cardano", AVAX: "avalanche-2",
+    DOT: "polkadot", MATIC: "matic-network", LINK: "chainlink", UNI: "uniswap",
+    LTC: "litecoin", BCH: "bitcoin-cash", XLM: "stellar", ATOM: "cosmos",
+    ALGO: "algorand", ICP: "internet-computer", NEAR: "near",
+    USDC: "usd-coin", USDT: "tether", DAI: "dai",
+    TRX: "tron", XMR: "monero", SHIB: "shiba-inu",
+    ARB: "arbitrum", OP: "optimism", TON: "the-open-network",
+    SUI: "sui", INJ: "injective-protocol",
+  };
+
+  const cgId = cgIdMap[symbol];
+  if (!cgId) {
+    return c.json({ error: "unsupported_symbol", message: `Price not available for ${symbol}` }, 404);
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!res.ok) return c.json({ error: "price_api_error", message: `CoinGecko returned ${res.status}` }, 502);
+    const data = await res.json() as any;
+    const coinData = data[cgId];
+    if (!coinData) return c.json({ error: "no_price_data" }, 404);
+    c.header("Cache-Control", "public, max-age=30");
+    return c.json({
+      symbol,
+      price_usd: coinData.usd,
+      change_24h_pct: coinData.usd_24h_change != null ? Math.round(coinData.usd_24h_change * 100) / 100 : null,
+      market_cap_usd: coinData.usd_market_cap ?? null,
+      timestamp: new Date().toISOString(),
+      source: "CoinGecko",
+    });
+  } catch (err: any) {
+    return c.json({ error: "price_fetch_failed", message: err.message }, 502);
+  }
+});
+
 // ─── favicon.ico — 204 to suppress 404 log noise ───
 app.get("/favicon.ico", (c) => new Response(null, { status: 204 }));
 

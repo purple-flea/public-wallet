@@ -505,6 +505,72 @@ wallet.post("/send", async (c) => {
   }
 });
 
+// GET /price — quick price lookup for common crypto assets (no auth) - useful for valuing holdings
+wallet.get("/price", async (c) => {
+  const symbol = (c.req.query("symbol") || "").toUpperCase().trim();
+
+  if (!symbol) {
+    return c.json({
+      error: "missing_symbol",
+      message: "Provide ?symbol=BTC (or ETH, SOL, USDC, etc.)",
+      examples: [
+        "GET /v1/wallet/price?symbol=BTC",
+        "GET /v1/wallet/price?symbol=ETH",
+        "GET /v1/wallet/price?symbol=SOL",
+        "GET /v1/wallet/price?symbol=BNB",
+      ],
+      supported_sources: "CoinGecko (free tier)",
+    }, 400);
+  }
+
+  // Map common symbols to CoinGecko IDs
+  const cgIdMap: Record<string, string> = {
+    BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
+    XRP: "ripple", DOGE: "dogecoin", ADA: "cardano", AVAX: "avalanche-2",
+    DOT: "polkadot", MATIC: "matic-network", LINK: "chainlink", UNI: "uniswap",
+    LTC: "litecoin", BCH: "bitcoin-cash", XLM: "stellar", ATOM: "cosmos",
+    ALGO: "algorand", ICP: "internet-computer", NEAR: "near", FTM: "fantom",
+    USDC: "usd-coin", USDT: "tether", DAI: "dai", BUSD: "binance-usd",
+    TRX: "tron", XMR: "monero", SHIB: "shiba-inu", APT: "aptos",
+    ARB: "arbitrum", OP: "optimism", TON: "the-open-network",
+    SUI: "sui", SEI: "sei-network", INJ: "injective-protocol",
+  };
+
+  const cgId = cgIdMap[symbol];
+  if (!cgId) {
+    return c.json({
+      error: "unsupported_symbol",
+      message: `Price lookup not available for ${symbol}. Supported: ${Object.keys(cgIdMap).join(", ")}`,
+    }, 404);
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!res.ok) {
+      return c.json({ error: "price_api_error", message: `CoinGecko returned ${res.status}` }, 502);
+    }
+    const data = await res.json() as any;
+    const coinData = data[cgId];
+    if (!coinData) {
+      return c.json({ error: "no_price_data", message: `No price data for ${symbol}` }, 404);
+    }
+    return c.json({
+      symbol,
+      coingecko_id: cgId,
+      price_usd: coinData.usd,
+      change_24h_pct: coinData.usd_24h_change != null ? Math.round(coinData.usd_24h_change * 100) / 100 : null,
+      market_cap_usd: coinData.usd_market_cap ?? null,
+      timestamp: new Date().toISOString(),
+      source: "CoinGecko",
+    });
+  } catch (err: any) {
+    return c.json({ error: "price_fetch_failed", message: err.message }, 502);
+  }
+});
+
 // POST /multi-send — fan out one private key to multiple recipients in one call
 wallet.post("/multi-send", async (c) => {
   const body = await c.req.json();
