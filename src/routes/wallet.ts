@@ -574,6 +574,79 @@ wallet.get("/price", async (c) => {
   }
 });
 
+// GET /prices?symbols=BTC,ETH,SOL — batch price lookup for multiple coins
+wallet.get("/prices", async (c) => {
+  const symbolsParam = c.req.query("symbols") || "";
+  const symbols = symbolsParam.split(",").map(s => s.trim().toUpperCase()).filter(Boolean).slice(0, 20);
+
+  if (symbols.length === 0) {
+    return c.json({
+      error: "missing_symbols",
+      message: "Provide ?symbols=BTC,ETH,SOL (comma-separated, up to 20)",
+      example: "GET /v1/wallet/prices?symbols=BTC,ETH,SOL,BNB,TRX",
+    }, 400);
+  }
+
+  const cgIdMap: Record<string, string> = {
+    BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
+    XRP: "ripple", DOGE: "dogecoin", ADA: "cardano", AVAX: "avalanche-2",
+    DOT: "polkadot", MATIC: "matic-network", LINK: "chainlink", UNI: "uniswap",
+    LTC: "litecoin", BCH: "bitcoin-cash", XLM: "stellar", ATOM: "cosmos",
+    ALGO: "algorand", NEAR: "near", USDC: "usd-coin", USDT: "tether",
+    DAI: "dai", TRX: "tron", XMR: "monero", SHIB: "shiba-inu", APT: "aptos",
+    ARB: "arbitrum", OP: "optimism", TON: "the-open-network",
+    SUI: "sui", SEI: "sei-network", INJ: "injective-protocol",
+  };
+
+  const resolved: Array<{ symbol: string; cgId: string }> = [];
+  const unsupported: string[] = [];
+
+  for (const symbol of symbols) {
+    const cgId = cgIdMap[symbol];
+    if (cgId) resolved.push({ symbol, cgId });
+    else unsupported.push(symbol);
+  }
+
+  if (resolved.length === 0) {
+    return c.json({
+      error: "no_supported_symbols",
+      message: `None of the requested symbols are supported: ${symbols.join(", ")}`,
+      supported: Object.keys(cgIdMap),
+    }, 400);
+  }
+
+  const uniqueIds = [...new Set(resolved.map(r => r.cgId))].join(",");
+
+  try {
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${uniqueIds}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) }
+    );
+
+    const data = res.ok ? await res.json() as Record<string, any> : {};
+
+    const prices = resolved.map(({ symbol, cgId }) => {
+      const d = data[cgId];
+      return {
+        symbol,
+        price_usd: d?.usd ?? null,
+        change_24h_pct: d?.usd_24h_change != null ? Math.round(d.usd_24h_change * 100) / 100 : null,
+        market_cap_usd: d?.usd_market_cap ?? null,
+      };
+    });
+
+    return c.json({
+      prices,
+      unsupported: unsupported.length > 0 ? unsupported : undefined,
+      count: prices.length,
+      timestamp: new Date().toISOString(),
+      source: "CoinGecko",
+    });
+  } catch (err: any) {
+    return c.json({ error: "price_fetch_failed", message: err.message }, 502);
+  }
+});
+
 // GET /portfolio-value?btc=bc1q...&eth=0x...&sol=So1... — USD value of multiple addresses
 wallet.get("/portfolio-value", async (c) => {
   const chainNativeTokens: Record<string, { symbol: string; cgId: string }> = {
