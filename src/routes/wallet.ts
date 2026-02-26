@@ -87,6 +87,130 @@ wallet.post("/create", async (c) => {
   }, 201);
 });
 
+// GET /deposit-address — returns agent's deposit instructions (non-custodial: addresses are derived from mnemonic)
+wallet.get("/deposit-address", async (c) => {
+  return c.json({
+    note: "This is a non-custodial wallet service. Your deposit addresses are derived from your mnemonic.",
+    how_to_get_address: "POST /v1/wallet/create to generate a new HD wallet — mnemonic shown ONCE. Save it securely.",
+    if_you_already_have_mnemonic: "Use a BIP39/BIP32 tool to re-derive addresses from your mnemonic offline.",
+    derivation_paths: {
+      ethereum: "m/44'/60'/0'/0/0",
+      base: "m/44'/60'/0'/0/0 (same as ethereum — EVM compatible)",
+      solana: "m/44'/501'/0'/0'",
+      bitcoin: "m/84'/0'/0'/0/0 (native segwit bech32)",
+      tron: "m/44'/195'/0'/0/0 (base58check, supports USDT TRC-20)",
+    },
+    tip: "Any address from these paths will accept deposits. Use Base USDC for lowest fees and fastest confirmation.",
+    check_balance: "GET /v1/wallet/balance/:your_address?chain=base",
+    supported_deposit_chains: ["ethereum", "base", "solana", "bitcoin", "tron"],
+  });
+});
+
+// GET /transactions/:address — recent on-chain transactions
+wallet.get("/transactions/:address", async (c) => {
+  const address = c.req.param("address");
+  const chain = (c.req.query("chain") || "base") as string;
+  const limit = Math.min(parseInt(c.req.query("limit") || "10", 10), 50);
+
+  if (chain === "bitcoin") {
+    try {
+      const res = await fetch(`https://mempool.space/api/address/${address}/txs`);
+      if (!res.ok) return c.json({ error: "api_error", message: `mempool.space ${res.status}` }, 502);
+      const txs = await res.json() as any[];
+      return c.json({
+        address, chain,
+        transactions: txs.slice(0, limit).map((tx: any) => ({
+          txid: tx.txid,
+          confirmed: tx.status?.confirmed ?? false,
+          block_height: tx.status?.block_height ?? null,
+          fee: tx.fee,
+          value_in: tx.vout?.reduce((sum: number, o: any) => o.scriptpubkey_address === address ? sum + o.value : sum, 0) ?? 0,
+          value_out: tx.vin?.reduce((sum: number, i: any) => i.prevout?.scriptpubkey_address === address ? sum + i.prevout.value : sum, 0) ?? 0,
+        })),
+        explorer: `https://mempool.space/address/${address}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "api_error", message: err.message }, 502);
+    }
+  }
+
+  if (chain === "solana") {
+    try {
+      const chainConfig = SUPPORTED_CHAINS["solana"];
+      const res = await fetch(chainConfig.rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "getSignaturesForAddress",
+          params: [address, { limit }],
+        }),
+      });
+      const data = await res.json() as any;
+      return c.json({
+        address, chain,
+        transactions: (data.result ?? []).map((sig: any) => ({
+          signature: sig.signature,
+          slot: sig.slot,
+          block_time: sig.blockTime ? new Date(sig.blockTime * 1000).toISOString() : null,
+          err: sig.err,
+        })),
+        explorer: `https://explorer.solana.com/address/${address}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "rpc_error", message: err.message }, 502);
+    }
+  }
+
+  // EVM chains — use Etherscan-compatible APIs
+  const explorerApis: Record<string, string> = {
+    base: "https://api.basescan.org/api",
+    ethereum: "https://api.etherscan.io/api",
+  };
+  const explorerApi = explorerApis[chain];
+  if (!explorerApi) {
+    return c.json({
+      error: "unsupported_chain",
+      message: `Transaction history not supported for ${chain} yet`,
+      supported_chains: ["bitcoin", "solana", "base", "ethereum"],
+    }, 400);
+  }
+
+  try {
+    const url = `${explorerApi}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=${limit}&sort=desc&apikey=YourApiKeyToken`;
+    const res = await fetch(url);
+    const data = await res.json() as any;
+
+    if (data.status === "0" && data.message !== "No transactions found") {
+      // API key not configured — return helpful message
+      return c.json({
+        address, chain,
+        transactions: [],
+        note: `Transaction history for ${chain} requires a block explorer API key. Use https://basescan.org/address/${address} to view manually.`,
+        explorer: `https://basescan.org/address/${address}`,
+      });
+    }
+
+    const txs = (data.result ?? []).slice(0, limit);
+    return c.json({
+      address, chain,
+      transactions: txs.map((tx: any) => ({
+        hash: tx.hash,
+        block_number: parseInt(tx.blockNumber),
+        timestamp: new Date(parseInt(tx.timeStamp) * 1000).toISOString(),
+        from: tx.from,
+        to: tx.to,
+        value_eth: ethers.formatEther(tx.value || "0"),
+        gas_used: tx.gasUsed,
+        status: tx.isError === "0" ? "success" : "failed",
+      })),
+      explorer: `https://basescan.org/address/${address}`,
+    });
+  } catch (err: any) {
+    return c.json({ error: "api_error", message: err.message }, 502);
+  }
+});
+
 // GET /balance/:address — on-chain balance
 wallet.get("/balance/:address", async (c) => {
   const address = c.req.param("address");
