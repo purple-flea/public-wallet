@@ -178,8 +178,8 @@ v1.get("/docs", (c) => c.json({
   },
   wallet: {
     "POST /v1/wallet/create": "Generate HD wallet (BIP-39). Returns mnemonic ONCE, derives addresses for Ethereum, Base, Solana, Bitcoin, Tron, Monero.",
-    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance. Chains: base, ethereum, solana, bitcoin, tron. Monero requires view key (not supported via API).",
-    "POST /v1/wallet/send": "Sign + broadcast transaction. Body: { chain, to, amount, private_key, token? }",
+    "GET /v1/wallet/balance/:address?chain=base": "On-chain balance. Chains: base, ethereum, solana, bitcoin, tron, monero. Monero requires ?view_key=<private_view_key>.",
+    "POST /v1/wallet/send": "Sign + broadcast transaction. Body: { chain, to, amount, private_key, token? }. Monero: { chain, from, to, amount, view_key, spend_key }.",
   },
   swap: {
     "GET /v1/wallet/swap/quote?from_chain=&to_chain=&from_token=&to_token=&amount=": "Get swap quote with fee breakdown",
@@ -270,7 +270,7 @@ AI agents create non-custodial BIP-39 HD wallets with one API key. Manage crypto
 
 ## Supported Chains
 - Wallet generation: Ethereum, Base, Solana, Bitcoin, Tron, Monero
-- Balance check + send: Ethereum, Base, Solana, Bitcoin, Tron
+- Balance check + send: Ethereum, Base, Solana, Bitcoin, Tron, Monero (XMR requires view_key for balance, spend_key for send)
 - Cross-chain swaps: Ethereum, Base, BSC, Arbitrum, Solana, Bitcoin, Monero, HyperEVM
 
 ## Quick Start
@@ -390,7 +390,8 @@ app.get("/openapi.json", (c) => c.json({
         summary: "Check on-chain balance",
         parameters: [
           { name: "address", in: "path", required: true, schema: { type: "string" } },
-          { name: "chain", in: "query", required: true, schema: { type: "string", enum: ["base", "ethereum", "solana", "bitcoin", "tron"] } }
+          { name: "chain", in: "query", required: true, schema: { type: "string", enum: ["base", "ethereum", "solana", "bitcoin", "tron", "monero"] } },
+          { name: "view_key", in: "query", required: false, schema: { type: "string", description: "Required for Monero balance check (private view key hex)" } }
         ],
         responses: { "200": { description: "Balance for native token" } }
       }
@@ -398,7 +399,8 @@ app.get("/openapi.json", (c) => c.json({
     "/v1/wallet/send": {
       post: {
         summary: "Sign and broadcast transaction",
-        requestBody: { content: { "application/json": { schema: { type: "object", required: ["chain","to","amount","private_key"], properties: { chain: { type: "string" }, to: { type: "string" }, amount: { type: "string" }, private_key: { type: "string" }, token: { type: "string", description: "Token contract address for ERC-20/SPL" } } } } } },
+        description: "For Monero: provide chain, from (primary address), to, amount, view_key, spend_key. For other chains: chain, to, amount, private_key, token (optional).",
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["chain","to","amount"], properties: { chain: { type: "string" }, to: { type: "string" }, amount: { type: "string" }, private_key: { type: "string", description: "Private key for EVM/Solana/Tron" }, token: { type: "string", description: "Token contract address for ERC-20/TRC-20" }, from: { type: "string", description: "Monero: your primary XMR address" }, view_key: { type: "string", description: "Monero: private view key" }, spend_key: { type: "string", description: "Monero: private spend key" } } } } } },
         responses: { "200": { description: "Transaction hash" } }
       }
     },
@@ -461,6 +463,17 @@ app.get("/openapi.json", (c) => c.json({
 app.get("/changelog", (c) => c.json({
   service: "public-wallet",
   changelog: [
+    {
+      version: "1.4.0",
+      date: "2026-02-26",
+      changes: [
+        "Full Monero (XMR) deposit and send support via monero-ts WASM (no binary required)",
+        "XMR balance check via remote node (xmr-node.cakewallet.com:18081), ~9s first sync, 5min cache",
+        "XMR send via monero-ts createTx + relay — requires private_view_key + private_spend_key",
+        "Updated GET /v1/wallet/deposit-address to include Monero derivation path and instructions",
+        "Updated openapi.json and llms.txt to reflect full XMR support",
+      ],
+    },
     {
       version: "1.3.0",
       date: "2026-02-26",

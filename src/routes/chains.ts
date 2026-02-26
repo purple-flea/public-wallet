@@ -273,4 +273,116 @@ chains.get("/yield", async (c) => {
   }
 });
 
+// ─── GET /estimate-cost — USD cost for common transaction types ───
+// tx_type: transfer | erc20_transfer | swap | nft_mint | contract_deploy | approve
+// chain: ethereum | base | arbitrum | bsc
+
+const GAS_UNITS: Record<string, number> = {
+  transfer: 21_000,
+  erc20_transfer: 65_000,
+  approve: 46_000,
+  swap: 150_000,       // typical DEX swap (Uniswap V3)
+  nft_mint: 200_000,   // typical ERC-721 mint
+  contract_deploy: 600_000, // average contract deployment
+};
+
+chains.get("/estimate-cost", async (c) => {
+  const txType = (c.req.query("tx_type") ?? "transfer").toLowerCase();
+  const chainFilter = c.req.query("chain")?.toLowerCase();
+  c.header("Cache-Control", "public, max-age=30");
+
+  const validTypes = Object.keys(GAS_UNITS);
+  if (!validTypes.includes(txType)) {
+    return c.json({
+      error: "invalid_tx_type",
+      message: `tx_type must be one of: ${validTypes.join(", ")}`,
+      example: "GET /v1/chains/estimate-cost?tx_type=swap&chain=base",
+    }, 400);
+  }
+
+  const gasUnits = GAS_UNITS[txType];
+
+  // Fetch ETH/BNB prices from CoinGecko
+  let ethUsd = 2400; // fallback
+  let bnbUsd = 380;  // fallback
+  try {
+    const priceRes = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,binancecoin&vs_currencies=usd",
+      { signal: AbortSignal.timeout(4000) }
+    );
+    const priceData = await priceRes.json() as any;
+    if (priceData?.ethereum?.usd) ethUsd = priceData.ethereum.usd;
+    if (priceData?.binancecoin?.usd) bnbUsd = priceData.binancecoin.usd;
+  } catch {
+    // use fallbacks
+  }
+
+  // Fetch gas prices for requested chains
+  const chainsToCheck = chainFilter
+    ? (GAS_CHAINS[chainFilter] ? [chainFilter] : [])
+    : Object.keys(GAS_CHAINS);
+
+  if (chainFilter && chainsToCheck.length === 0) {
+    return c.json({
+      error: "unsupported_chain",
+      message: `Supported chains: ${Object.keys(GAS_CHAINS).join(", ")}`,
+    }, 400);
+  }
+
+  const gasResults = await Promise.allSettled(chainsToCheck.map(fetchGasPrice));
+
+  const estimates = gasResults
+    .map((r, i) => {
+      if (r.status !== "fulfilled" || !r.value.gas_price_gwei) return null;
+      const gas = r.value;
+      const chainKey = chainsToCheck[i];
+      const nativePrice = chainKey === "bsc" ? bnbUsd : ethUsd;
+      const gasGwei = gas.gas_price_gwei as number;
+      const costNative = (gasGwei * gasUnits) / 1e9;
+      const costUsd = costNative * nativePrice;
+
+      return {
+        chain: gas.chain,
+        chain_id: gas.chain_id,
+        native_token: gas.native_token,
+        gas_price_gwei: gas.gas_price_gwei,
+        gas_units: gasUnits,
+        cost_native: parseFloat(costNative.toFixed(8)),
+        cost_usd: parseFloat(costUsd.toFixed(4)),
+        native_price_usd: nativePrice,
+        speed_estimate: gasGwei < 2 ? "fast (<15s)" : gasGwei < 10 ? "normal (~30s)" : "congested",
+      };
+    })
+    .filter(Boolean);
+
+  // Sort by cost_usd asc
+  estimates.sort((a, b) => (a!.cost_usd ?? 999) - (b!.cost_usd ?? 999));
+
+  const cheapest = estimates[0];
+
+  return c.json({
+    tx_type: txType,
+    gas_units: gasUnits,
+    estimates,
+    cheapest_chain: cheapest ? {
+      chain: cheapest.chain,
+      cost_usd: cheapest.cost_usd,
+      tip: cheapest.cost_usd < 0.01
+        ? `${cheapest.chain} is nearly free for this operation`
+        : `${cheapest.chain} costs ~$${cheapest.cost_usd.toFixed(3)} for this operation`,
+    } : null,
+    tx_type_guide: {
+      transfer: "Send native token (ETH/BNB) to another address",
+      erc20_transfer: "Send USDC, USDT, or any ERC-20 token",
+      approve: "Allow a contract (e.g. DEX) to spend your tokens",
+      swap: "Swap tokens on Uniswap V3 or similar DEX",
+      nft_mint: "Mint a new NFT (ERC-721)",
+      contract_deploy: "Deploy a new smart contract",
+    },
+    prices_used: { eth_usd: ethUsd, bnb_usd: bnbUsd },
+    note: "Gas estimates are approximate. Actual cost depends on network congestion and contract complexity.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 export default chains;
