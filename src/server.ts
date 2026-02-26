@@ -369,6 +369,51 @@ app.get("/openapi.json", (c) => c.json({
   },
 }));
 
+// ─── Changelog ───
+app.get("/changelog", (c) => c.json({
+  service: "public-wallet",
+  changelog: [
+    {
+      version: "1.3.0",
+      date: "2026-02-26",
+      changes: [
+        "Added POST /v1/wallet/multi-send: fan out one EVM key to up to 20 recipients in one call with nonce management",
+        "Added GET /openapi.json updated with deposit-address, transactions, swap/status, gossip paths",
+        "Added global error handler and 404 handler",
+      ],
+    },
+    {
+      version: "1.2.0",
+      date: "2026-02-25",
+      changes: [
+        "Added GET /v1/wallet/transactions/:address: on-chain tx history (Bitcoin, Solana, Base, Ethereum)",
+        "Added GET /v1/wallet/deposit-address: non-custodial deposit instructions with derivation paths",
+        "Added POST /v1/swap: Wagyu cross-chain swap aggregator integration",
+        "Added 3-level referral commission chain",
+      ],
+    },
+    {
+      version: "1.1.0",
+      date: "2026-02-23",
+      changes: [
+        "Added Tron (TRX/USDT TRC-20) support: derive, balance, send",
+        "Added Monero (XMR) address derivation from BIP39 seed",
+        "GET /v1/wallet/balance/:address supports bitcoin, solana, tron, ethereum, base, monero",
+      ],
+    },
+    {
+      version: "1.0.0",
+      date: "2026-02-20",
+      changes: [
+        "Initial launch: HD wallet creation (BIP39 24-word mnemonic)",
+        "Support for Ethereum, Base, Solana, Bitcoin addresses",
+        "POST /v1/wallet/send for EVM and Solana transfers",
+        "GET /v1/wallet/balance for on-chain balance checks",
+      ],
+    },
+  ],
+}));
+
 const port = parseInt(process.env.PORT || "3005", 10);
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Public Wallet v1 running on http://localhost:${info.port}`);
