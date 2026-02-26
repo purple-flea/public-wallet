@@ -2,8 +2,8 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { runMigrations, db } from "./db/index.js";
-import { agents, swaps } from "./db/schema.js";
-import { sql } from "drizzle-orm";
+import { agents, swaps, referralEarnings } from "./db/schema.js";
+import { sql, desc } from "drizzle-orm";
 import { auth } from "./routes/auth.js";
 import wallet from "./routes/wallet.js";
 import swap from "./routes/swap.js";
@@ -151,6 +151,230 @@ v1.get("/public-stats", (c) => {
 
 // ─── /stats alias (no auth) — for economy dashboard ───
 v1.get("/stats", (c) => c.redirect("/v1/public-stats", 301));
+
+// ─── Token info (public, no auth) ───
+const TOKEN_INFO: Record<string, {
+  symbol: string; name: string; coingecko_id: string; decimals: number;
+  chains: Record<string, { address: string | null; native?: boolean }>;
+  notes?: string;
+}> = {
+  ETH: { symbol: "ETH", name: "Ether", coingecko_id: "ethereum", decimals: 18, chains: { ethereum: { address: null, native: true }, base: { address: null, native: true }, arbitrum: { address: null, native: true } } },
+  BTC: { symbol: "BTC", name: "Bitcoin", coingecko_id: "bitcoin", decimals: 8, chains: { bitcoin: { address: null, native: true } }, notes: "Use deposit addresses to receive BTC" },
+  SOL: { symbol: "SOL", name: "Solana", coingecko_id: "solana", decimals: 9, chains: { solana: { address: null, native: true } } },
+  USDC: { symbol: "USDC", name: "USD Coin", coingecko_id: "usd-coin", decimals: 6, chains: { ethereum: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }, base: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }, solana: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" }, arbitrum: { address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" } } },
+  USDT: { symbol: "USDT", name: "Tether USD", coingecko_id: "tether", decimals: 6, chains: { ethereum: { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7" }, base: { address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2" }, tron: { address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+  WBTC: { symbol: "WBTC", name: "Wrapped Bitcoin", coingecko_id: "wrapped-bitcoin", decimals: 8, chains: { ethereum: { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" }, base: { address: "0x0555E30da8f98308EdbC7b3416E4bD25634E0d62" } } },
+  ARB: { symbol: "ARB", name: "Arbitrum", coingecko_id: "arbitrum", decimals: 18, chains: { arbitrum: { address: "0x912CE59144191C1204E64559FE8253a0e49E6548" } } },
+  OP: { symbol: "OP", name: "Optimism", coingecko_id: "optimism", decimals: 18, chains: { optimism: { address: null, native: true } } },
+  MATIC: { symbol: "MATIC", name: "Polygon", coingecko_id: "matic-network", decimals: 18, chains: { polygon: { address: null, native: true }, ethereum: { address: "0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0" } } },
+  XMR: { symbol: "XMR", name: "Monero", coingecko_id: "monero", decimals: 12, chains: { monero: { address: null, native: true } }, notes: "Privacy coin — no EVM contract" },
+  TRX: { symbol: "TRX", name: "Tron", coingecko_id: "tron", decimals: 6, chains: { tron: { address: null, native: true } } },
+};
+
+v1.get("/token-info/:symbol", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+  const symbol = c.req.param("symbol").toUpperCase();
+  const info = TOKEN_INFO[symbol];
+  if (!info) {
+    return c.json({
+      error: "token_not_found",
+      symbol,
+      supported_symbols: Object.keys(TOKEN_INFO),
+      note: "Request support for more tokens at GET /v1/gossip",
+    }, 404);
+  }
+  return c.json({
+    ...info,
+    swap: `POST /v1/swap { "from_token": "${symbol}", "to_token": "USDC", ... }`,
+    price: "GET /v1/price?symbol=" + symbol,
+    supported_tokens: Object.keys(TOKEN_INFO),
+  });
+});
+
+v1.get("/token-info", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json({
+    supported_tokens: Object.keys(TOKEN_INFO),
+    tokens: Object.values(TOKEN_INFO).map(t => ({
+      symbol: t.symbol,
+      name: t.name,
+      coingecko_id: t.coingecko_id,
+      chains: Object.keys(t.chains),
+      decimals: t.decimals,
+    })),
+    lookup: "GET /v1/token-info/:symbol for detailed info + contract addresses",
+  });
+});
+
+// ─── Leaderboard (public, 60s cache) ───
+v1.get("/leaderboard", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  // Top 10 agents by swap volume (by count of swaps)
+  const bySwapCount = db.select({
+    agentId: swaps.agentId,
+    swapCount: sql<number>`COUNT(*)`,
+    totalFees: sql<number>`COALESCE(SUM(${swaps.feeAmount}), 0)`,
+  }).from(swaps)
+    .groupBy(swaps.agentId)
+    .orderBy(desc(sql`COUNT(*)`))
+    .limit(10)
+    .all();
+
+  // Top 10 agents by referral earnings
+  const refEarnings = db.select({
+    referrerId: referralEarnings.referrerId,
+    totalCommission: sql<number>`COALESCE(SUM(${referralEarnings.commissionAmount}), 0)`,
+    refCount: sql<number>`COUNT(*)`,
+  }).from(referralEarnings)
+    .groupBy(referralEarnings.referrerId)
+    .orderBy(desc(sql`SUM(${referralEarnings.commissionAmount})`))
+    .limit(10)
+    .all();
+
+  const totalAgents = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+  const totalSwaps = db.select({ count: sql<number>`count(*)` }).from(swaps).get()?.count ?? 0;
+  const totalFees = db.select({ v: sql<number>`COALESCE(SUM(${swaps.feeAmount}), 0)` }).from(swaps).get()?.v ?? 0;
+
+  return c.json({
+    service: "public-wallet",
+    updated: new Date().toISOString(),
+    by_swap_volume: {
+      title: "Top 10 agents by swap count",
+      entries: bySwapCount.map((a, i) => ({
+        rank: i + 1,
+        agent: a.agentId.slice(0, 6) + "...",
+        total_swaps: a.swapCount,
+        total_fees_paid_usd: Math.round(a.totalFees * 100) / 100,
+      })),
+    },
+    by_referral_earnings: {
+      title: "Top 10 agents by referral commission earned",
+      entries: refEarnings.map((r, i) => ({
+        rank: i + 1,
+        agent: r.referrerId.slice(0, 6) + "...",
+        total_referral_commission_usd: Math.round(r.totalCommission * 100) / 100,
+        referral_swaps: r.refCount,
+      })),
+    },
+    network: {
+      total_agents: totalAgents,
+      total_swaps_all_time: totalSwaps,
+      total_fees_collected_usd: Math.round(totalFees * 100) / 100,
+    },
+    join: "POST /v1/auth/register — earn 10% commission on swaps from agents you refer",
+  });
+});
+
+// ─── Activity feed (public, 30s cache) ───
+v1.get("/feed", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const recentSwaps = db.select({
+    id: swaps.id,
+    agentId: swaps.agentId,
+    fromChain: swaps.fromChain,
+    toChain: swaps.toChain,
+    fromToken: swaps.fromToken,
+    toToken: swaps.toToken,
+    fromAmount: swaps.fromAmount,
+    feeAmount: swaps.feeAmount,
+    status: swaps.status,
+    createdAt: swaps.createdAt,
+  }).from(swaps)
+    .orderBy(desc(swaps.createdAt))
+    .limit(20)
+    .all();
+
+  const feed = recentSwaps.map((s) => {
+    const agent = s.agentId.slice(0, 6);
+    const routeLabel = s.fromChain === s.toChain
+      ? `on ${s.fromChain}`
+      : `from ${s.fromChain} to ${s.toChain}`;
+    return {
+      event: `Agent ${agent}... swapped ${s.fromAmount} ${s.fromToken} → ${s.toToken} ${routeLabel}`,
+      agent: agent + "...",
+      from_token: s.fromToken,
+      to_token: s.toToken,
+      from_chain: s.fromChain,
+      to_chain: s.toChain,
+      amount: s.fromAmount,
+      fee_usd: Math.round(s.feeAmount * 100) / 100,
+      status: s.status,
+      at: new Date(s.createdAt * 1000).toISOString(),
+    };
+  });
+
+  const totalSwaps = db.select({ count: sql<number>`count(*)` }).from(swaps).get()?.count ?? 0;
+
+  return c.json({
+    service: "public-wallet",
+    feed,
+    total_swaps_all_time: totalSwaps,
+    note: "Last 20 swaps. Agent IDs anonymized to first 6 chars. Updates every 30s.",
+    register: "POST /v1/auth/register to start swapping",
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── Swap fee estimate (public, 30s cache) ───
+v1.get("/swap/estimate", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+  const fromToken = (c.req.query("from") || "ETH").toUpperCase();
+  const toToken = (c.req.query("to") || "USDC").toUpperCase();
+  const amountStr = c.req.query("amount") || "1";
+  const chain = (c.req.query("chain") || "ethereum").toLowerCase();
+
+  const amount = parseFloat(amountStr);
+  if (isNaN(amount) || amount <= 0) {
+    return c.json({ error: "invalid_amount", message: "amount must be a positive number" }, 400);
+  }
+
+  // Static price approximations for common tokens (USDC base)
+  const PRICES: Record<string, number> = {
+    BTC: 68000, ETH: 2800, SOL: 150, BNB: 580, AVAX: 35,
+    MATIC: 0.85, ARB: 1.1, OP: 2.2, SUI: 1.6, DOT: 7.5,
+    USDC: 1, USDT: 1, DAI: 1, BUSD: 1,
+    WBTC: 68000, WETH: 2800,
+  };
+
+  const fromPrice = PRICES[fromToken] ?? 1;
+  const toPrice = PRICES[toToken] ?? 1;
+  const inputValueUsd = amount * fromPrice;
+  const feeRate = 0.005; // 0.5% flat fee
+  const feeUsd = inputValueUsd * feeRate;
+  const priceImpact = inputValueUsd > 10000 ? 0.3 : inputValueUsd > 1000 ? 0.1 : 0.05;
+  const estimatedOutputValue = inputValueUsd - feeUsd - (inputValueUsd * priceImpact / 100);
+  const estimatedOutput = estimatedOutputValue / toPrice;
+
+  const CHAIN_ROUTES: Record<string, string[]> = {
+    ethereum: ["ethereum-native", "uniswap-v3"],
+    base: ["base-native", "aerodrome"],
+    solana: ["solana-native", "jupiter-aggregator"],
+    bitcoin: ["bitcoin-native"],
+    tron: ["tron-native", "sunswap"],
+    bnb: ["bsc-native", "pancakeswap"],
+  };
+
+  return c.json({
+    from_token: fromToken,
+    to_token: toToken,
+    chain,
+    input_amount: amount,
+    input_value_usd: Math.round(inputValueUsd * 100) / 100,
+    estimated_output: Math.round(estimatedOutput * 1e6) / 1e6,
+    estimated_output_usd: Math.round(estimatedOutputValue * 100) / 100,
+    fee_usd: Math.round(feeUsd * 100) / 100,
+    fee_pct: (feeRate * 100).toFixed(2) + "%",
+    price_impact_pct: priceImpact.toFixed(2) + "%",
+    route: CHAIN_ROUTES[chain] ?? ["cross-chain-bridge"],
+    note: "Estimates use approximate market prices. Actual output depends on live liquidity.",
+    execute: "POST /v1/swap to execute — requires auth",
+    register: "POST /v1/auth/register to get API key",
+    prices_used: { [fromToken]: fromPrice, [toToken]: toPrice },
+    cached_at: new Date().toISOString(),
+  });
+});
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
