@@ -147,4 +147,130 @@ chains.get("/tokens", (c) => {
   });
 });
 
+// GET /chains/yield — live USDC yield rates across DeFi protocols (via DeFi Llama)
+chains.get("/yield", async (c) => {
+  c.header("Cache-Control", "public, max-age=300"); // 5min cache
+
+  // DeFi Llama pools API — filter for USDC on Base/Ethereum
+  // Pool IDs for well-known USDC lending markets
+  const KNOWN_POOLS: Array<{
+    id: string;
+    protocol: string;
+    chain: string;
+    token: string;
+    type: string;
+    risk: string;
+    tvl_floor_usd: number; // min TVL to consider it legitimate
+  }> = [
+    { id: "43641cf5-a92e-416b-bce9-27113d3c0db6", protocol: "Maple Finance", chain: "Ethereum", token: "USDC", type: "lending", risk: "medium", tvl_floor_usd: 1_000_000 },
+    { id: "c5c74dd1-995c-4445-9d84-3e710bad7d52", protocol: "Spark (DAI Savings)", chain: "Ethereum", token: "USDC", type: "savings", risk: "low", tvl_floor_usd: 1_000_000 },
+    { id: "7372edda-f07f-4598-83e5-4edec48c4039", protocol: "Fluid Lending", chain: "Base", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 100_000 },
+    { id: "4438dabc-7f0c-430b-8136-2722711ae663", protocol: "Fluid Lending", chain: "Ethereum", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 1_000_000 },
+    { id: "7e0661bf-8cf3-45e6-9424-31916d4c7b84", protocol: "Aave V3", chain: "Base", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 1_000_000 },
+    { id: "0c8567f8-ba5b-41ad-80de-00a71895eb19", protocol: "Compound V3", chain: "Base", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 500_000 },
+    { id: "aa70268e-4b52-42bf-a116-608b370f9501", protocol: "Aave V3", chain: "Ethereum", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 1_000_000 },
+    { id: "7da72d09-56ca-4ec5-a45f-59114353e487", protocol: "Compound V3", chain: "Ethereum", token: "USDC", type: "lending", risk: "low", tvl_floor_usd: 1_000_000 },
+  ];
+
+  try {
+    // Fetch all pools from DeFi Llama (returns all, we filter by our known IDs)
+    const res = await fetch("https://yields.llama.fi/pools", {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) throw new Error(`DeFi Llama returned ${res.status}`);
+
+    const data = await res.json() as { data: Array<{
+      pool: string;
+      apy: number | null;
+      apyBase: number | null;
+      apyReward: number | null;
+      tvlUsd: number | null;
+      symbol: string;
+      project: string;
+      chain: string;
+    }> };
+
+    const poolMap = new Map<string, typeof data.data[0]>();
+    for (const pool of data.data) {
+      poolMap.set(pool.pool, pool);
+    }
+
+    // Build results from known pools
+    const yields = KNOWN_POOLS.map(known => {
+      const live = poolMap.get(known.id);
+      if (!live || (live.tvlUsd ?? 0) < known.tvl_floor_usd) {
+        return { ...known, apy: null, apy_base: null, apy_reward: null, tvl_usd: live?.tvlUsd ?? null, status: "data_unavailable" };
+      }
+      return {
+        protocol: known.protocol,
+        chain: known.chain,
+        token: known.token,
+        type: known.type,
+        risk: known.risk,
+        apy: live.apy !== null ? parseFloat(live.apy.toFixed(2)) : null,
+        apy_base: live.apyBase !== null ? parseFloat(live.apyBase.toFixed(2)) : null,
+        apy_reward: live.apyReward !== null ? parseFloat(live.apyReward.toFixed(2)) : null,
+        tvl_usd: live.tvlUsd !== null ? Math.round(live.tvlUsd) : null,
+        status: "live",
+      };
+    }).filter(y => y.status === "live");
+
+    // Sort by APY desc
+    yields.sort((a, b) => (b.apy ?? 0) - (a.apy ?? 0));
+
+    const bestYield = yields[0] ?? null;
+    const avgApy = yields.length > 0
+      ? parseFloat((yields.reduce((s, y) => s + (y.apy ?? 0), 0) / yields.length).toFixed(2))
+      : null;
+
+    return c.json({
+      as_of: new Date().toISOString(),
+      token: "USDC",
+      best_apy: bestYield ? {
+        protocol: bestYield.protocol,
+        chain: bestYield.chain,
+        apy_pct: bestYield.apy,
+        annual_yield_on_1000: bestYield.apy !== null ? parseFloat(((bestYield.apy / 100) * 1000).toFixed(2)) : null,
+      } : null,
+      average_apy_pct: avgApy,
+      yields,
+      how_to_earn: {
+        simplest: "Deposit USDC into Coinbase, which pays ~5% APY natively (cbUSDC via Morpho on Base)",
+        on_chain: [
+          "1. Bridge USDC to Base via https://bridge.base.org",
+          "2. Connect wallet to app.aave.com or moonwell.fi",
+          "3. Supply USDC — earn interest instantly",
+          "4. Withdraw any time with no lock-up",
+        ],
+        note: "All listed protocols are non-custodial. You keep custody of funds. Smart contract risk applies.",
+      },
+      comparison: {
+        traditional_savings: "~4.5% (HYSA, 2026)",
+        treasury_yield: "~4.3% (3-month T-bill)",
+        best_defi_usdc: bestYield?.apy ? `${bestYield.apy}% on ${bestYield.protocol} (${bestYield.chain})` : "N/A",
+        note: "DeFi rates fluctuate with utilization. Higher rates = higher demand for borrowing.",
+      },
+      source: "DeFi Llama yield API (yields.llama.fi)",
+      disclaimer: "Not financial advice. Smart contract risk. Rates change continuously.",
+    });
+  } catch (err: any) {
+    // Fallback: return static approximate rates
+    return c.json({
+      as_of: new Date().toISOString(),
+      token: "USDC",
+      note: "Live rates unavailable — showing approximate rates as of Feb 2026",
+      error: err.message,
+      approximate_yields: [
+        { protocol: "Aave V3", chain: "Base", apy_approx_pct: 5.5, risk: "low" },
+        { protocol: "Aave V3", chain: "Ethereum", apy_approx_pct: 4.8, risk: "low" },
+        { protocol: "Compound V3", chain: "Base", apy_approx_pct: 5.2, risk: "low" },
+        { protocol: "Moonwell", chain: "Base", apy_approx_pct: 6.0, risk: "low" },
+      ],
+      how_to_check: "Retry in a few minutes or visit https://defillama.com/yields?token=USDC",
+    });
+  }
+});
+
 export default chains;
