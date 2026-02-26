@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS treasury_ledger (
   source TEXT NOT NULL, reference TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS address_book (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id),
+  label TEXT NOT NULL, address TEXT NOT NULL, chain TEXT NOT NULL,
+  note TEXT, last_used_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_address_book_agent ON address_book(agent_id);
 CREATE INDEX IF NOT EXISTS idx_agents_referral ON agents(referral_code);
 CREATE INDEX IF NOT EXISTS idx_swaps_agent ON swaps(agent_id);
 CREATE INDEX IF NOT EXISTS idx_swaps_order ON swaps(order_id);

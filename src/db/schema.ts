@@ -63,6 +63,19 @@ export const referralWithdrawals = sqliteTable("referral_withdrawals", {
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
 });
 
+export const addressBook = sqliteTable("address_book", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  label: text("label").notNull(), // e.g. "My Coinbase", "Trading wallet"
+  address: text("address").notNull(),
+  chain: text("chain").notNull(), // ethereum, base, solana, bitcoin, tron
+  note: text("note"),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_address_book_agent").on(table.agentId),
+]);
+
 export const treasuryLedger = sqliteTable("treasury_ledger", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),

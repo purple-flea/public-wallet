@@ -4,7 +4,7 @@ import { SUPPORTED_CHAINS, type ChainName } from "../chains/config.js";
 import type { AppEnv } from "../types.js";
 import { db } from "../db/index.js";
 import * as schema from "../db/schema.js";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and } from "drizzle-orm";
 import * as bip39 from "bip39";
 import { ethers } from "ethers";
 import { derivePath } from "ed25519-hd-key";
@@ -15,6 +15,7 @@ import * as bitcoin from "bitcoinjs-lib";
 import bs58 from "bs58";
 import { createHash } from "crypto";
 import { deriveMoneroKeys } from "../chains/monero.js";
+import { getXmrBalance, sendXmr } from "../chains/xmr-wallet.js";
 
 const bip32 = BIP32Factory(ecc);
 
@@ -78,6 +79,11 @@ wallet.post("/create", async (c) => {
   return c.json({
     mnemonic,
     addresses,
+    monero_keys: {
+      private_spend_key: xmrKeys.privateSpendKey,
+      private_view_key: xmrKeys.privateViewKey,
+      note: "Save these keys. You need private_view_key to check balance and private_spend_key to send XMR.",
+    },
     warning: "This mnemonic is shown ONCE and never stored. Save it securely. Loss = loss of funds.",
     derivation_paths: {
       ethereum: "m/44'/60'/0'/0/0",
@@ -326,11 +332,33 @@ wallet.get("/balance/:address", async (c) => {
   }
 
   if (chain === "monero") {
-    return c.json({
-      error: "not_supported",
-      message: "Monero balance cannot be checked from address alone. Monero encrypts balances on-chain — you need your private view key + a synced node. Use the Monero CLI wallet or MyMonero with your mnemonic.",
-      alternative: "Restore wallet with your mnemonic at mymonero.com or monero-wallet-cli",
-    }, 422);
+    const viewKey = c.req.query("view_key");
+    if (!viewKey) {
+      return c.json({
+        error: "view_key_required",
+        message: "Monero balance requires your private_view_key. Pass it as ?view_key=<hex>. Your view key was returned when you created your wallet via POST /v1/wallet/create.",
+        example: `GET /v1/wallet/balance/${address}?chain=monero&view_key=<your_private_view_key>`,
+      }, 400);
+    }
+    try {
+      const xmrBalance = await getXmrBalance(address, viewKey);
+      return c.json({
+        address,
+        chain: "monero",
+        balance: {
+          native: {
+            symbol: "XMR",
+            amount: xmrBalance.balance_xmr,
+            piconero: xmrBalance.balance_piconero,
+          },
+        },
+        synced_at: xmrBalance.synced_at,
+        cached: xmrBalance.cached,
+        explorer: `https://xmrchain.net/search?value=${address}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "xmr_balance_error", message: err.message }, 502);
+    }
   }
 
   // EVM chains (ethereum, base)
@@ -361,10 +389,14 @@ wallet.post("/send", async (c) => {
     chain: string; to: string; amount: string; private_key: string; token?: string;
   };
 
-  if (!chain || !to || !amount || !private_key) {
+  // Monero uses separate view_key + spend_key instead of private_key
+  const isMonero = chain === "monero";
+  if (!chain || !to || !amount || (!private_key && !isMonero)) {
     return c.json({
       error: "invalid_request",
-      message: "Provide chain, to, amount, and private_key",
+      message: isMonero
+        ? "Provide chain, from, to, amount, view_key, and spend_key for Monero"
+        : "Provide chain, to, amount, and private_key",
     }, 400);
   }
 
@@ -461,10 +493,28 @@ wallet.post("/send", async (c) => {
   }
 
   if (chain === "monero") {
-    return c.json({
-      error: "not_supported",
-      message: "Monero send requires a Monero wallet daemon (monero-wallet-rpc) with a synced node. Use the Monero CLI wallet or MyMonero with your mnemonic to send XMR.",
-    }, 422);
+    const { view_key, spend_key, from } = body as { view_key?: string; spend_key?: string; from?: string };
+    if (!view_key || !spend_key || !from) {
+      return c.json({
+        error: "keys_required",
+        message: "Monero send requires from (your primary address), view_key, and spend_key in the request body. These were returned when you created your wallet via POST /v1/wallet/create.",
+        required_body_fields: ["chain", "from", "to", "amount", "view_key", "spend_key"],
+      }, 400);
+    }
+    try {
+      const result = await sendXmr(from, view_key, spend_key, to, amount);
+      return c.json({
+        tx_hash: result.tx_hash,
+        chain: "monero",
+        from,
+        to,
+        amount: result.amount_xmr,
+        fee: result.fee_xmr,
+        explorer: `https://xmrchain.net/tx/${result.tx_hash}`,
+      });
+    } catch (err: any) {
+      return c.json({ error: "xmr_send_failed", message: err.message }, 400);
+    }
   }
 
   // EVM chains
@@ -1056,6 +1106,152 @@ wallet.get("/nfts/:address", async (c) => {
         : `https://etherscan.io/address/${address}#inventory`,
     }, 200); // 200 so agents don't bail — they can handle empty gracefully
   }
+});
+
+// GET /address-book — list saved contacts
+wallet.get("/address-book", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const contacts = db.select().from(schema.addressBook)
+    .where(eq(schema.addressBook.agentId, agentId))
+    .orderBy(desc(schema.addressBook.createdAt))
+    .all();
+
+  return c.json({
+    total: contacts.length,
+    contacts: contacts.map(entry => ({
+      id: entry.id,
+      label: entry.label,
+      address: entry.address,
+      chain: entry.chain,
+      note: entry.note ?? null,
+      last_used_at: entry.lastUsedAt ? new Date(entry.lastUsedAt * 1000).toISOString() : null,
+      created_at: new Date(entry.createdAt * 1000).toISOString(),
+    })),
+    tip: "POST /v1/wallet/address-book to add a contact. Use label to remember addresses.",
+  });
+});
+
+// POST /address-book — add a new contact
+wallet.post("/address-book", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json();
+  const { label, address, chain, note } = body as {
+    label: string; address: string; chain: string; note?: string;
+  };
+
+  if (!label || !address || !chain) {
+    return c.json({
+      error: "invalid_request",
+      message: "Provide label, address, and chain",
+      supported_chains: ["ethereum", "base", "solana", "bitcoin", "tron"],
+      example: { label: "My Coinbase", address: "0x...", chain: "base", note: "USDC receiving address" },
+    }, 400);
+  }
+
+  const VALID_CHAINS = ["ethereum", "base", "solana", "bitcoin", "tron", "monero"];
+  if (!VALID_CHAINS.includes(chain)) {
+    return c.json({ error: "unsupported_chain", supported: VALID_CHAINS }, 400);
+  }
+
+  if (label.length > 50) {
+    return c.json({ error: "label_too_long", message: "Label must be 50 chars or less" }, 400);
+  }
+
+  // Check for duplicate address+chain for this agent
+  const existing = db.select({ id: schema.addressBook.id })
+    .from(schema.addressBook)
+    .where(and(
+      eq(schema.addressBook.agentId, agentId),
+      eq(schema.addressBook.address, address),
+      eq(schema.addressBook.chain, chain),
+    ))
+    .get();
+
+  if (existing) {
+    return c.json({ error: "duplicate_contact", message: "This address+chain is already in your address book", id: existing.id }, 409);
+  }
+
+  // Max 50 contacts per agent
+  const countResult = db.select({ count: sql<number>`COUNT(*)` })
+    .from(schema.addressBook)
+    .where(eq(schema.addressBook.agentId, agentId))
+    .get();
+
+  if ((countResult?.count ?? 0) >= 50) {
+    return c.json({ error: "limit_reached", message: "Maximum 50 contacts per agent" }, 400);
+  }
+
+  const { randomUUID } = await import("crypto");
+  const id = "ab_" + randomUUID().replace(/-/g, "").slice(0, 12);
+
+  db.insert(schema.addressBook).values({
+    id,
+    agentId,
+    label,
+    address,
+    chain,
+    note: note ?? null,
+  }).run();
+
+  return c.json({
+    id,
+    label,
+    address,
+    chain,
+    note: note ?? null,
+    message: "Contact saved to address book",
+    use_in_send: `POST /v1/wallet/send { chain: "${chain}", to: "${address}", amount: "...", private_key: "..." }`,
+  }, 201);
+});
+
+// PATCH /address-book/:id — update a contact label or note
+wallet.patch("/address-book/:id", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const contactId = c.req.param("id");
+  const body = await c.req.json();
+
+  const contact = db.select().from(schema.addressBook)
+    .where(and(eq(schema.addressBook.id, contactId), eq(schema.addressBook.agentId, agentId)))
+    .get();
+
+  if (!contact) {
+    return c.json({ error: "not_found", message: "Contact not found" }, 404);
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (body.label !== undefined) updates.label = String(body.label).slice(0, 50);
+  if (body.note !== undefined) updates.note = body.note === null ? null : String(body.note);
+
+  if (Object.keys(updates).length === 0) {
+    return c.json({ error: "no_changes", message: "Provide label or note to update" }, 400);
+  }
+
+  db.update(schema.addressBook)
+    .set(updates)
+    .where(eq(schema.addressBook.id, contactId))
+    .run();
+
+  return c.json({ id: contactId, ...updates, message: "Contact updated" });
+});
+
+// DELETE /address-book/:id — remove a contact
+wallet.delete("/address-book/:id", (c) => {
+  const agentId = c.get("agentId") as string;
+  const contactId = c.req.param("id");
+
+  const contact = db.select({ id: schema.addressBook.id })
+    .from(schema.addressBook)
+    .where(and(eq(schema.addressBook.id, contactId), eq(schema.addressBook.agentId, agentId)))
+    .get();
+
+  if (!contact) {
+    return c.json({ error: "not_found", message: "Contact not found" }, 404);
+  }
+
+  db.delete(schema.addressBook).where(eq(schema.addressBook.id, contactId)).run();
+
+  return c.json({ deleted: contactId, message: "Contact removed from address book" });
 });
 
 // GET /activity — unified activity feed: swaps + referral earnings + referral withdrawals
