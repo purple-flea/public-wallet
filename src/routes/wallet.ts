@@ -1570,6 +1570,149 @@ wallet.get("/swap-analytics", authMiddleware, async (c) => {
   });
 });
 
+// ─── ERC-20 token allowance checker ───
+// Checks how much of a token a spender is approved to use on behalf of the owner
+
+wallet.get("/token-allowance", async (c) => {
+  const chain = c.req.query("chain") ?? "";
+  const token = c.req.query("token") ?? "";    // ERC-20 contract address
+  const owner = c.req.query("owner") ?? "";    // wallet address that owns tokens
+  const spender = c.req.query("spender") ?? ""; // contract approved to spend
+
+  const KNOWN_SPENDERS: Record<string, string> = {
+    // Uniswap V3 Router
+    "0xe592427a0aece92de3edee1f18e0157c05861564": "Uniswap V3 Router",
+    "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45": "Uniswap V3 Router02",
+    // 1inch V5
+    "0x1111111254eeb25477b68fb85ed929f73a960582": "1inch V5 Aggregator",
+    // OpenSea Seaport
+    "0x00000000000001ad428e4906ae43d8f9852d0dd6": "OpenSea Seaport 1.5",
+    // Permit2
+    "0x000000000022d473030f116ddee9f6b43ac78ba3": "Uniswap Permit2",
+    // Aave V3
+    "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2": "Aave V3 Pool",
+  };
+
+  const EVM_CHAINS: Record<string, string> = {
+    ethereum: "https://eth.llamarpc.com",
+    base: "https://mainnet.base.org",
+    arbitrum: "https://arb1.arbitrum.io/rpc",
+    bsc: "https://bsc-dataseed1.bnbchain.org",
+  };
+
+  const WELL_KNOWN_TOKENS: Record<string, Record<string, { symbol: string; decimals: number }>> = {
+    ethereum: {
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": { symbol: "USDC", decimals: 6 },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": { symbol: "USDT", decimals: 6 },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": { symbol: "DAI", decimals: 18 },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": { symbol: "WETH", decimals: 18 },
+    },
+    base: {
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": { symbol: "USDC", decimals: 6 },
+      "0x4200000000000000000000000000000000000006": { symbol: "WETH", decimals: 18 },
+    },
+    arbitrum: {
+      "0xaf88d065e77c8cc2239327c5edb3a432268e5831": { symbol: "USDC", decimals: 6 },
+      "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": { symbol: "USDT", decimals: 6 },
+    },
+  };
+
+  if (!chain || !EVM_CHAINS[chain]) {
+    return c.json({
+      error: "invalid_chain",
+      message: `chain must be one of: ${Object.keys(EVM_CHAINS).join(", ")}`,
+      note: "Token allowances are EVM-only (Ethereum, Base, Arbitrum, BSC)",
+    }, 400);
+  }
+  if (!token || !token.startsWith("0x")) {
+    return c.json({ error: "invalid_token", message: "token must be a valid ERC-20 contract address (0x...)" }, 400);
+  }
+  if (!owner || !owner.startsWith("0x")) {
+    return c.json({ error: "invalid_owner", message: "owner must be a valid EVM address (0x...)" }, 400);
+  }
+  if (!spender || !spender.startsWith("0x")) {
+    return c.json({ error: "invalid_spender", message: "spender must be a valid EVM address (0x...)" }, 400);
+  }
+
+  const rpc = EVM_CHAINS[chain];
+  const tokenLower = token.toLowerCase();
+  const spenderLower = spender.toLowerCase();
+  const ownerLower = owner.toLowerCase();
+  const tokenInfo = WELL_KNOWN_TOKENS[chain]?.[tokenLower] ?? null;
+
+  // ERC-20 allowance(address owner, address spender) => uint256
+  // keccak256("allowance(address,address)") = 0xdd62ed3e
+  const ownerPadded = ownerLower.replace("0x", "").padStart(64, "0");
+  const spenderPadded = spenderLower.replace("0x", "").padStart(64, "0");
+  const calldata = "0xdd62ed3e" + ownerPadded + spenderPadded;
+
+  // Also fetch decimals if unknown: keccak256("decimals()") = 0x313ce567
+  let decimals = tokenInfo?.decimals ?? null;
+  let symbol = tokenInfo?.symbol ?? null;
+
+  try {
+    if (decimals === null) {
+      const decRes = await fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: token, data: "0x313ce567" }, "latest"] }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const decData = await decRes.json() as any;
+      if (decData.result && decData.result !== "0x") {
+        decimals = parseInt(decData.result, 16);
+      }
+    }
+
+    const res = await fetch(rpc, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_call", params: [{ to: token, data: calldata }, "latest"] }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json() as any;
+
+    if (!data.result || data.result === "0x") {
+      return c.json({ error: "call_failed", message: "eth_call returned empty response — verify contract address and chain" }, 502);
+    }
+
+    const rawAllowance = BigInt(data.result);
+    const divisor = BigInt(10 ** (decimals ?? 18));
+    const allowanceFormatted = Number(rawAllowance) / Math.pow(10, decimals ?? 18);
+    const isUnlimited = rawAllowance >= BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff") / BigInt(2);
+
+    const spenderLabel = KNOWN_SPENDERS[spenderLower] ?? null;
+
+    return c.json({
+      chain,
+      token_contract: token,
+      token_symbol: symbol,
+      token_decimals: decimals,
+      owner,
+      spender,
+      spender_label: spenderLabel,
+      allowance: {
+        raw: rawAllowance.toString(),
+        formatted: isUnlimited ? "unlimited" : Math.round(allowanceFormatted * 1e6) / 1e6,
+        is_unlimited: isUnlimited,
+        is_zero: rawAllowance === BigInt(0),
+      },
+      risk_note: isUnlimited
+        ? `WARNING: ${spenderLabel ?? "This spender"} has UNLIMITED access to your ${symbol ?? "tokens"}. Consider revoking via POST /v1/wallet/send with an approval of 0.`
+        : rawAllowance === BigInt(0)
+        ? "No allowance. Spender cannot transfer tokens on your behalf."
+        : `Spender can transfer up to ${Math.round(allowanceFormatted * 1e6) / 1e6} ${symbol ?? "tokens"}.`,
+      revoke_example: {
+        description: "To revoke: send approve(spender, 0) transaction",
+        endpoint: "POST /v1/wallet/send",
+        note: "Include approve ABI calldata in the 'data' field with amount 0",
+      },
+    });
+  } catch (e: any) {
+    return c.json({ error: "rpc_error", message: e.message }, 502);
+  }
+});
+
 // ─── USDC multi-chain balance aggregator ───
 
 wallet.get("/usdc-balance", async (c) => {
