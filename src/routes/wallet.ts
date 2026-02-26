@@ -1570,4 +1570,247 @@ wallet.get("/swap-analytics", authMiddleware, async (c) => {
   });
 });
 
+// ─── Portfolio tracker (uses address book) ───
+
+// GET /portfolio — live USD value across all saved addresses
+wallet.get("/portfolio", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const savedAddresses = db
+    .select()
+    .from(schema.addressBook)
+    .where(eq(schema.addressBook.agentId, agentId))
+    .all();
+
+  if (savedAddresses.length === 0) {
+    return c.json({
+      total_value_usd: 0,
+      wallets: [],
+      message: "No addresses saved. Add addresses via POST /v1/wallet/portfolio/addresses",
+      tip: "Save your wallet addresses once, then call GET /v1/wallet/portfolio anytime to see your total USD value.",
+    });
+  }
+
+  const chainNativeTokens: Record<string, { symbol: string; cgId: string }> = {
+    ethereum: { symbol: "ETH", cgId: "ethereum" },
+    base: { symbol: "ETH", cgId: "ethereum" },
+    solana: { symbol: "SOL", cgId: "solana" },
+    bitcoin: { symbol: "BTC", cgId: "bitcoin" },
+    tron: { symbol: "TRX", cgId: "tron" },
+  };
+
+  // Fetch all unique token prices in one CoinGecko call
+  const relevantChains = savedAddresses.map(a => a.chain).filter(ch => chainNativeTokens[ch]);
+  const uniqueCgIds = [...new Set(relevantChains.map(ch => chainNativeTokens[ch]?.cgId).filter(Boolean))];
+  let prices: Record<string, number> = {};
+
+  try {
+    const cgRes = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${uniqueCgIds.join(",")}&vs_currencies=usd`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) }
+    );
+    if (cgRes.ok) {
+      const cgData = await cgRes.json() as any;
+      for (const [cgId, data] of Object.entries(cgData)) {
+        prices[cgId] = (data as any).usd ?? 0;
+      }
+    }
+  } catch {
+    // Continue without prices
+  }
+
+  // Fetch balances in parallel (best-effort)
+  const results = await Promise.all(savedAddresses.map(async (saved) => {
+    const { chain, address } = saved;
+    const tokenInfo = chainNativeTokens[chain];
+    let amount = 0;
+    let error: string | null = null;
+
+    try {
+      if (chain === "bitcoin") {
+        const res = await fetch(`https://mempool.space/api/address/${address}`, { signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+          const data = await res.json() as any;
+          const sats = (data.chain_stats?.funded_txo_sum ?? 0) - (data.chain_stats?.spent_txo_sum ?? 0)
+            + (data.mempool_stats?.funded_txo_sum ?? 0) - (data.mempool_stats?.spent_txo_sum ?? 0);
+          amount = sats / 1e8;
+        }
+      } else if (chain === "solana") {
+        const rpcRes = await fetch("https://api.mainnet-beta.solana.com", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const rpcData = await rpcRes.json() as any;
+        amount = (rpcData.result?.value ?? 0) / 1e9;
+      } else if (chain === "tron") {
+        const tronRes = await fetch("https://api.trongrid.io/wallet/getaccount", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address, visible: true }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const tronData = await tronRes.json() as any;
+        amount = (tronData.balance ?? 0) / 1_000_000;
+      } else if (chain === "ethereum" || chain === "base") {
+        const rpcUrls: Record<string, string> = {
+          ethereum: "https://eth.public-rpc.com",
+          base: "https://mainnet.base.org",
+        };
+        const rpc = rpcUrls[chain];
+        if (rpc) {
+          const rpcRes = await fetch(rpc, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBalance", params: [address, "latest"], id: 1 }),
+            signal: AbortSignal.timeout(8000),
+          });
+          const rpcData = await rpcRes.json() as any;
+          if (rpcData.result) {
+            amount = parseInt(rpcData.result, 16) / 1e18;
+          }
+        }
+      }
+    } catch (e: any) {
+      error = e.message;
+    }
+
+    const priceUsd = tokenInfo ? (prices[tokenInfo.cgId] ?? null) : null;
+    const valueUsd = priceUsd !== null ? Math.round(amount * priceUsd * 100) / 100 : null;
+
+    return {
+      id: saved.id,
+      label: saved.label,
+      chain,
+      address,
+      symbol: tokenInfo?.symbol ?? chain.toUpperCase(),
+      balance: Math.round(amount * 1e8) / 1e8,
+      price_usd: priceUsd,
+      value_usd: valueUsd,
+      note: saved.note ?? undefined,
+      ...(error ? { error } : {}),
+    };
+  }));
+
+  const totalValueUsd = results.reduce((sum, r) => sum + (r.value_usd ?? 0), 0);
+
+  // Group by chain for summary
+  const byChain: Record<string, { count: number; value_usd: number }> = {};
+  for (const r of results) {
+    if (!byChain[r.chain]) byChain[r.chain] = { count: 0, value_usd: 0 };
+    byChain[r.chain].count++;
+    byChain[r.chain].value_usd += r.value_usd ?? 0;
+  }
+  for (const ch of Object.keys(byChain)) {
+    byChain[ch].value_usd = Math.round(byChain[ch].value_usd * 100) / 100;
+  }
+
+  return c.json({
+    total_value_usd: Math.round(totalValueUsd * 100) / 100,
+    address_count: savedAddresses.length,
+    by_chain: byChain,
+    wallets: results,
+    prices_usd: prices,
+    timestamp: new Date().toISOString(),
+    note: "Native token balances only. Manage addresses via POST/DELETE /v1/wallet/portfolio/addresses",
+  });
+});
+
+// GET /portfolio/addresses — list saved addresses
+wallet.get("/portfolio/addresses", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const addresses = db
+    .select()
+    .from(schema.addressBook)
+    .where(eq(schema.addressBook.agentId, agentId))
+    .all();
+
+  return c.json({
+    count: addresses.length,
+    addresses: addresses.map(a => ({
+      id: a.id,
+      label: a.label,
+      chain: a.chain,
+      address: a.address,
+      note: a.note ?? undefined,
+      created_at: new Date(a.createdAt * 1000).toISOString(),
+      last_used_at: a.lastUsedAt ? new Date(a.lastUsedAt * 1000).toISOString() : null,
+    })),
+    tip: "GET /v1/wallet/portfolio to fetch live balances + USD values for all saved addresses",
+  });
+});
+
+// POST /portfolio/addresses — save an address to portfolio
+wallet.post("/portfolio/addresses", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json() as any;
+  const { label, chain, address, note } = body;
+
+  const supportedChains = ["ethereum", "base", "solana", "bitcoin", "tron"];
+  if (!label || typeof label !== "string" || label.trim().length === 0) {
+    return c.json({ error: "invalid_request", message: "label is required" }, 400);
+  }
+  if (!chain || !supportedChains.includes(chain)) {
+    return c.json({ error: "invalid_request", message: `chain must be one of: ${supportedChains.join(", ")}` }, 400);
+  }
+  if (!address || typeof address !== "string" || address.trim().length === 0) {
+    return c.json({ error: "invalid_request", message: "address is required" }, 400);
+  }
+
+  // Limit to 50 addresses per agent
+  const existing = db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(schema.addressBook)
+    .where(eq(schema.addressBook.agentId, agentId))
+    .get();
+
+  if ((existing?.count ?? 0) >= 50) {
+    return c.json({ error: "limit_reached", message: "Maximum 50 addresses per portfolio. Delete some to add more." }, 400);
+  }
+
+  const id = `addr_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+
+  db.insert(schema.addressBook).values({
+    id,
+    agentId,
+    label: label.trim(),
+    chain,
+    address: address.trim(),
+    note: note?.trim() ?? null,
+  }).run();
+
+  return c.json({
+    success: true,
+    id,
+    label: label.trim(),
+    chain,
+    address: address.trim(),
+    message: "Address saved to portfolio. Call GET /v1/wallet/portfolio to see live balances.",
+  }, 201);
+});
+
+// DELETE /portfolio/addresses/:id — remove address from portfolio
+wallet.delete("/portfolio/addresses/:id", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+  const addrId = c.req.param("id");
+
+  const existing = db
+    .select()
+    .from(schema.addressBook)
+    .where(and(eq(schema.addressBook.id, addrId), eq(schema.addressBook.agentId, agentId)))
+    .get();
+
+  if (!existing) {
+    return c.json({ error: "not_found", message: "Address not found or not owned by you" }, 404);
+  }
+
+  db.delete(schema.addressBook)
+    .where(and(eq(schema.addressBook.id, addrId), eq(schema.addressBook.agentId, agentId)))
+    .run();
+
+  return c.json({ success: true, message: `Address "${existing.label}" (${existing.chain}: ${existing.address}) removed from portfolio.` });
+});
+
 export default wallet;
