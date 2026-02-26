@@ -122,9 +122,10 @@ v1.use("/wallet/swap", rateLimit(30, 60_000));           // 30 swaps/min per IP
 v1.use("/wallet/send", rateLimit(20, 60_000));           // 20 sends/min per IP
 
 v1.route("/auth", auth);
-v1.route("/wallet", wallet);
+// Register more-specific routes BEFORE generic /wallet to avoid auth middleware swallowing them
+v1.route("/wallet/chains", chains);  // public chain/token info — no auth needed
 v1.route("/wallet/swap", swap);
-v1.route("/wallet/chains", chains);
+v1.route("/wallet", wallet);
 v1.route("/referral", referral);
 
 // ─── Public stats (no auth) ───
