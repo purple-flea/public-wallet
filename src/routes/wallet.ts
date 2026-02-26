@@ -108,10 +108,13 @@ wallet.get("/deposit-address", async (c) => {
       solana: "m/44'/501'/0'/0'",
       bitcoin: "m/84'/0'/0'/0/0 (native segwit bech32)",
       tron: "m/44'/195'/0'/0/0 (base58check, supports USDT TRC-20)",
+      monero: "HMAC-SHA512('monero seed', bip39_seed) → Ed25519 keys (returned in monero_keys on wallet create)",
     },
     tip: "Any address from these paths will accept deposits. Use Base USDC for lowest fees and fastest confirmation.",
     check_balance: "GET /v1/wallet/balance/:your_address?chain=base",
-    supported_deposit_chains: ["ethereum", "base", "solana", "bitcoin", "tron"],
+    check_xmr_balance: "GET /v1/wallet/balance/:xmr_address?chain=monero&view_key=<private_view_key>",
+    supported_deposit_chains: ["ethereum", "base", "solana", "bitcoin", "tron", "monero"],
+    monero_note: "XMR address and keys (private_view_key, private_spend_key) are returned when you POST /v1/wallet/create",
   });
 });
 
@@ -1350,6 +1353,150 @@ wallet.get("/activity", (c) => {
     },
     events: page,
     filter_options: "Add ?type=swaps|referral_earnings|referral_withdrawals to filter",
+  });
+});
+
+// ─── GET /swap-analytics — deep analytics on agent's swap history ───
+
+wallet.get("/swap-analytics", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+  const period = c.req.query("period") ?? "all"; // all | week | month | today
+  c.header("Cache-Control", "private, max-age=60");
+
+  const now = Math.floor(Date.now() / 1000);
+  let sinceTs: number | null = null;
+  let periodLabel = "All Time";
+
+  if (period === "today") {
+    sinceTs = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+    periodLabel = "Today (UTC)";
+  } else if (period === "week") {
+    sinceTs = now - 7 * 86400;
+    periodLabel = "Last 7 Days";
+  } else if (period === "month") {
+    sinceTs = now - 30 * 86400;
+    periodLabel = "Last 30 Days";
+  }
+
+  // All swaps for this agent in period
+  const swaps = db.select()
+    .from(schema.swaps)
+    .where(and(
+      eq(schema.swaps.agentId, agentId),
+      ...(sinceTs !== null ? [sql`${schema.swaps.createdAt} >= ${sinceTs}`] : []),
+    ))
+    .orderBy(desc(schema.swaps.createdAt))
+    .all();
+
+  if (swaps.length === 0) {
+    return c.json({
+      period: periodLabel,
+      total_swaps: 0,
+      message: "No swaps yet. Use POST /v1/swap to make your first swap.",
+      how_to_swap: "POST /v1/swap { from_chain, from_token, to_chain, to_token, amount, to_address }",
+    });
+  }
+
+  // ─── Volume by route (from_token → to_token) ───
+  const routeMap = new Map<string, { count: number; total_fees: number }>();
+  for (const s of swaps) {
+    const key = `${s.fromToken}→${s.toToken}`;
+    const existing = routeMap.get(key) ?? { count: 0, total_fees: 0 };
+    existing.count++;
+    existing.total_fees += s.feeAmount;
+    routeMap.set(key, existing);
+  }
+  const topRoutes = Array.from(routeMap.entries())
+    .map(([route, stats]) => ({ route, count: stats.count, total_fees: Math.round(stats.total_fees * 100) / 100 }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  // ─── Volume by chain pair ───
+  const chainPairMap = new Map<string, number>();
+  for (const s of swaps) {
+    const key = `${s.fromChain}→${s.toChain}`;
+    chainPairMap.set(key, (chainPairMap.get(key) ?? 0) + 1);
+  }
+  const topChainPairs = Array.from(chainPairMap.entries())
+    .map(([pair, count]) => ({ pair, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  // ─── Status breakdown ───
+  const statusMap = new Map<string, number>();
+  for (const s of swaps) {
+    statusMap.set(s.status, (statusMap.get(s.status) ?? 0) + 1);
+  }
+  const byStatus = Object.fromEntries(statusMap.entries());
+
+  // ─── Fee analysis ───
+  const totalFees = swaps.reduce((sum, s) => sum + s.feeAmount, 0);
+  const fees = swaps.map(s => s.feeAmount);
+  const avgFee = totalFees / swaps.length;
+  const maxFee = Math.max(...fees);
+  const minFee = Math.min(...fees);
+
+  // ─── Activity over time (last 7 days rolling) ───
+  const sevenDaysAgo = now - 7 * 86400;
+  const recentSwaps = swaps.filter(s => s.createdAt >= sevenDaysAgo);
+
+  // Group by day
+  const dayBuckets = new Map<string, { count: number; fees: number }>();
+  for (const s of recentSwaps) {
+    const day = new Date(s.createdAt * 1000).toISOString().slice(0, 10);
+    const bucket = dayBuckets.get(day) ?? { count: 0, fees: 0 };
+    bucket.count++;
+    bucket.fees += s.feeAmount;
+    dayBuckets.set(day, bucket);
+  }
+  const dailyActivity = Array.from(dayBuckets.entries())
+    .map(([date, stats]) => ({ date, swaps: stats.count, fees: Math.round(stats.fees * 100) / 100 }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // ─── Most active day of week ───
+  const dowCounts = new Array(7).fill(0);
+  const dowNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  for (const s of swaps) {
+    const dow = new Date(s.createdAt * 1000).getUTCDay();
+    dowCounts[dow]++;
+  }
+  const busiestDay = dowNames[dowCounts.indexOf(Math.max(...dowCounts))];
+
+  // ─── First / most recent swap ───
+  const oldest = swaps[swaps.length - 1];
+  const newest = swaps[0];
+
+  // ─── Pending/in-flight swaps ───
+  const pending = swaps.filter(s => s.status === "pending" || s.status === "processing");
+
+  return c.json({
+    period: periodLabel,
+    total_swaps: swaps.length,
+    fees: {
+      total: Math.round(totalFees * 100) / 100,
+      average: Math.round(avgFee * 100) / 100,
+      max: Math.round(maxFee * 100) / 100,
+      min: Math.round(minFee * 100) / 100,
+    },
+    by_status: byStatus,
+    top_routes: topRoutes,
+    top_chain_pairs: topChainPairs,
+    activity: {
+      last_7_days: dailyActivity,
+      busiest_day_of_week: busiestDay,
+      first_swap_at: new Date(oldest.createdAt * 1000).toISOString(),
+      most_recent_swap_at: new Date(newest.createdAt * 1000).toISOString(),
+    },
+    pending: pending.length > 0
+      ? {
+          count: pending.length,
+          order_ids: pending.map(s => s.orderId),
+          tip: "Check status at GET /v1/swap/:order_id",
+        }
+      : null,
+    period_options: ["today", "week", "month", "all"],
+    tip: "Add ?period=week for last 7 days activity",
+    updated_at: new Date().toISOString(),
   });
 });
 
