@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { runMigrations, db } from "./db/index.js";
-import { agents } from "./db/schema.js";
+import { agents, swaps } from "./db/schema.js";
 import { sql } from "drizzle-orm";
 import { auth } from "./routes/auth.js";
 import wallet from "./routes/wallet.js";
@@ -126,6 +126,18 @@ v1.route("/wallet", wallet);
 v1.route("/wallet/swap", swap);
 v1.route("/wallet/chains", chains);
 v1.route("/referral", referral);
+
+// ─── Public stats (no auth) ───
+v1.get("/public-stats", (c) => {
+  const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
+  const swapResult = db.select({ count: sql<number>`count(*)` }).from(swaps).get();
+  return c.json({
+    service: "public-wallet",
+    registered_agents: agentResult?.count ?? 0,
+    total_swaps: swapResult?.count ?? 0,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
@@ -412,6 +424,65 @@ app.get("/changelog", (c) => c.json({
       ],
     },
   ],
+}));
+
+// ─── robots.txt ───
+app.get("/robots.txt", (c) => {
+  c.header("Content-Type", "text/plain");
+  return c.text(`User-agent: *
+Allow: /
+Allow: /v1/gossip
+Allow: /v1/public-stats
+Allow: /v1/wallet/chains
+Allow: /llms.txt
+Allow: /openapi.json
+Allow: /health
+
+Sitemap: https://wallet.purpleflea.com/sitemap.xml
+`);
+});
+
+// ─── sitemap.xml ───
+app.get("/sitemap.xml", (c) => {
+  c.header("Content-Type", "application/xml");
+  const urls = [
+    "/",
+    "/health",
+    "/v1/gossip",
+    "/v1/public-stats",
+    "/v1/wallet/chains",
+    "/v1/docs",
+    "/openapi.json",
+    "/llms.txt",
+    "/changelog",
+  ];
+  const loc = (path: string) => `<url><loc>https://wallet.purpleflea.com${path}</loc></url>`;
+  return c.text(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(loc).join("\n")}
+</urlset>`);
+});
+
+// ─── /.well-known/agent.json ───
+app.get("/.well-known/agent.json", (c) => c.json({
+  name: "Purple Flea Public Wallet",
+  description: "Multi-chain non-custodial HD wallet for AI agents. Generate wallets, check balances, send, and do cross-chain swaps across 6+ chains.",
+  url: "https://wallet.purpleflea.com",
+  version: "1.0.0",
+  type: "service",
+  category: "wallet",
+  for_agents: true,
+  registration: "POST /v1/auth/register",
+  documentation: "https://wallet.purpleflea.com/llms.txt",
+  openapi: "https://wallet.purpleflea.com/openapi.json",
+  gossip: "https://wallet.purpleflea.com/v1/gossip",
+  capabilities: ["hd-wallet", "multi-chain", "cross-chain-swap", "balance-check", "send"],
+  chains: ["ethereum", "base", "solana", "bitcoin", "tron", "monero"],
+  referral: {
+    program: "3-level",
+    commission: "10% swap fees",
+    endpoint: "GET /v1/referral/code",
+  },
 }));
 
 const port = parseInt(process.env.PORT || "3005", 10);
