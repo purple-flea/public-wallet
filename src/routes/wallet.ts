@@ -505,4 +505,101 @@ wallet.post("/send", async (c) => {
   }
 });
 
+// POST /multi-send — fan out one private key to multiple recipients in one call
+wallet.post("/multi-send", async (c) => {
+  const body = await c.req.json();
+  const { chain, private_key, recipients, token } = body as {
+    chain: string;
+    private_key: string;
+    token?: string;
+    recipients: Array<{ to: string; amount: string }>;
+  };
+
+  if (!chain || !private_key || !Array.isArray(recipients) || recipients.length === 0) {
+    return c.json({
+      error: "invalid_request",
+      message: "Provide chain, private_key, and recipients (array of {to, amount})",
+      example: {
+        chain: "base",
+        private_key: "0x...",
+        recipients: [
+          { to: "0xAbc...", amount: "1.5" },
+          { to: "0xDef...", amount: "0.75" },
+        ],
+      },
+    }, 400);
+  }
+
+  if (recipients.length > 20) {
+    return c.json({ error: "too_many_recipients", message: "Maximum 20 recipients per call" }, 400);
+  }
+
+  const chainConfig = SUPPORTED_CHAINS[chain as ChainName];
+  if (!chainConfig) {
+    return c.json({ error: "unsupported_chain", supported: Object.keys(SUPPORTED_CHAINS) }, 400);
+  }
+
+  if (chain === "bitcoin" || chain === "solana" || chain === "tron" || chain === "monero") {
+    return c.json({
+      error: "not_supported",
+      message: `multi-send is only supported on EVM chains (ethereum, base). Received: ${chain}`,
+      supported_for_multi_send: ["ethereum", "base"],
+    }, 400);
+  }
+
+  // EVM multi-send: sequential sends with nonce management
+  const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
+  const signer = new ethers.Wallet(private_key, provider);
+
+  let nonce = await provider.getTransactionCount(signer.address, "latest");
+
+  const results: Array<{
+    to: string;
+    amount: string;
+    status: "sent" | "failed";
+    tx_hash?: string;
+    explorer?: string;
+    error?: string;
+  }> = [];
+
+  for (const { to, amount } of recipients) {
+    try {
+      let txHash: string;
+
+      if (token) {
+        const erc20Abi = ["function transfer(address to, uint256 amount) returns (bool)"];
+        const contract = new ethers.Contract(token, erc20Abi, signer);
+        const tx = await contract.transfer(to, ethers.parseUnits(amount, 6), { nonce });
+        const receipt = await tx.wait();
+        txHash = receipt.hash;
+      } else {
+        const tx = await signer.sendTransaction({ to, value: ethers.parseEther(amount), nonce });
+        const receipt = await tx.wait();
+        txHash = receipt!.hash;
+      }
+
+      results.push({
+        to, amount, status: "sent",
+        tx_hash: txHash,
+        explorer: `${chainConfig.explorer}/tx/${txHash}`,
+      });
+      nonce++;
+    } catch (err: any) {
+      results.push({ to, amount, status: "failed", error: err.message });
+    }
+  }
+
+  const sent = results.filter((r) => r.status === "sent").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+
+  return c.json({
+    chain,
+    from: signer.address,
+    total: recipients.length,
+    sent,
+    failed,
+    results,
+  }, sent > 0 ? 200 : 400);
+});
+
 export default wallet;
