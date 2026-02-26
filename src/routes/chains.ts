@@ -385,4 +385,133 @@ chains.get("/estimate-cost", async (c) => {
   });
 });
 
+// ─── GET /send-preview — estimate actual gas fee for a specific send transaction ───
+
+chains.get("/send-preview", async (c) => {
+  const chain = c.req.query("chain") ?? "";
+  const from = c.req.query("from") ?? "";
+  const to = c.req.query("to") ?? "";
+  const amount = c.req.query("amount") ?? "";
+  const token = c.req.query("token") ?? ""; // optional ERC-20 contract
+
+  if (!chain || !GAS_CHAINS[chain]) {
+    return c.json({
+      error: "invalid_chain",
+      message: `chain must be one of: ${Object.keys(GAS_CHAINS).join(", ")}`,
+      note: "For Bitcoin use mempool.space/api/v1/fees/recommended. For Solana, fee is ~0.000005 SOL.",
+      example: "GET /v1/wallet/chains/send-preview?chain=base&from=0x1234...&to=0x5678...&amount=1.5",
+    }, 400);
+  }
+  if (!from || !from.startsWith("0x")) {
+    return c.json({ error: "invalid_from", message: "from must be a valid EVM address (0x...)" }, 400);
+  }
+  if (!to || !to.startsWith("0x")) {
+    return c.json({ error: "invalid_to", message: "to must be a valid EVM address (0x...)" }, 400);
+  }
+
+  const chainConfig = GAS_CHAINS[chain];
+  const rpc = chainConfig.rpc;
+
+  // Fetch gas price and native token price in parallel
+  const [gasData, priceData] = await Promise.allSettled([
+    fetchGasPrice(chain),
+    fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${chain === "bsc" ? "binancecoin" : "ethereum"}&vs_currencies=usd`,
+      { signal: AbortSignal.timeout(4000) }
+    ).then(r => r.json() as Promise<any>).catch(() => null),
+  ]);
+
+  const gas = gasData.status === "fulfilled" ? gasData.value : null;
+  const priceJson = priceData.status === "fulfilled" ? priceData.value : null;
+  const nativePriceUsd: number = chain === "bsc"
+    ? (priceJson?.binancecoin?.usd ?? 380)
+    : (priceJson?.ethereum?.usd ?? 2400);
+
+  // Build the tx object for eth_estimateGas
+  let txData: string | undefined;
+  let estimatedGasUnits = 21000; // default: native transfer
+
+  if (token && token.startsWith("0x")) {
+    // ERC-20 transfer: encode transfer(address,uint256)
+    // keccak256("transfer(address,uint256)") = 0xa9059cbb
+    const toClean = to.toLowerCase().replace("0x", "").padStart(64, "0");
+    // We can't know exact amount without decimals, use placeholder uint256
+    const amountHex = "0000000000000000000000000000000000000000000000000de0b6b3a7640000"; // 1 token (18 dec placeholder)
+    txData = "0xa9059cbb" + toClean + amountHex;
+    estimatedGasUnits = 65000; // typical ERC-20 transfer
+  }
+
+  // Try eth_estimateGas for more precise estimate
+  let preciseGasUnits: number | null = null;
+  try {
+    const txObj: Record<string, string> = { from, to: token || to };
+    if (txData) txObj.data = txData;
+    if (!txData && amount) {
+      // Convert amount to wei for native transfer
+      const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18)).toString(16);
+      txObj.value = "0x" + amountWei;
+    }
+
+    const estimateRes = await fetch(rpc, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_estimateGas", params: [txObj, "latest"] }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const estimateData = await estimateRes.json() as any;
+    if (estimateData.result) {
+      preciseGasUnits = parseInt(estimateData.result, 16);
+    }
+  } catch {
+    // Fall back to typical gas units
+  }
+
+  const finalGasUnits = preciseGasUnits ?? estimatedGasUnits;
+  const gasGwei = gas?.gas_price_gwei ?? null;
+
+  if (!gasGwei) {
+    return c.json({
+      error: "gas_fetch_failed",
+      message: "Could not fetch current gas price",
+      chain,
+    }, 502);
+  }
+
+  // Calculate fee
+  const feeNative = (gasGwei * finalGasUnits) / 1e9;
+  const feeUsd = feeNative * nativePriceUsd;
+
+  // Add 20% buffer for fee recommendation
+  const recommendedGwei = gasGwei * 1.2;
+  const recommendedFeeNative = (recommendedGwei * finalGasUnits) / 1e9;
+  const recommendedFeeUsd = recommendedFeeNative * nativePriceUsd;
+
+  return c.json({
+    chain,
+    from,
+    to,
+    amount: amount || null,
+    token: token || null,
+    tx_type: token ? "erc20_transfer" : "native_transfer",
+    gas: {
+      current_gas_price_gwei: Math.round(gasGwei * 10000) / 10000,
+      gas_units: finalGasUnits,
+      estimate_source: preciseGasUnits ? "eth_estimateGas (precise)" : "typical gas units (estimated)",
+    },
+    fee: {
+      native_amount: Math.round(feeNative * 1e8) / 1e8,
+      native_token: chainConfig.nativeToken,
+      usd_amount: Math.round(feeUsd * 10000) / 10000,
+    },
+    recommended_fee: {
+      note: "+20% buffer for faster confirmation",
+      gwei: Math.round(recommendedGwei * 10000) / 10000,
+      native_amount: Math.round(recommendedFeeNative * 1e8) / 1e8,
+      usd_amount: Math.round(recommendedFeeUsd * 10000) / 10000,
+    },
+    native_token_price_usd: nativePriceUsd,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 export default chains;
