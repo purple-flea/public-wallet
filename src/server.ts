@@ -185,6 +185,9 @@ v1.get("/docs", (c) => c.json({
   },
   chains: {
     "GET /v1/wallet/chains": "List supported chains for wallet and swap operations",
+    "GET /v1/wallet/chains/gas": "Current gas prices across Ethereum, Base, Arbitrum, BSC (no auth)",
+    "GET /v1/wallet/chains/gas/:chain": "Gas price for specific chain: ethereum|base|arbitrum|bsc",
+    "GET /v1/wallet/chains/tokens": "Well-known ERC-20 token addresses on Base and Ethereum",
   },
   referral: {
     "GET /v1/referral/code": "Get your referral code",

@@ -3,6 +3,94 @@ import { SUPPORTED_CHAINS, WAGYU_CHAIN_IDS } from "../chains/config.js";
 
 const chains = new Hono();
 
+// EVM RPC endpoints for gas price checks
+const GAS_CHAINS: Record<string, { name: string; rpc: string; nativeToken: string; chainId: number }> = {
+  ethereum: { name: "Ethereum", rpc: "https://eth.llamarpc.com", nativeToken: "ETH", chainId: 1 },
+  base: { name: "Base", rpc: "https://mainnet.base.org", nativeToken: "ETH", chainId: 8453 },
+  arbitrum: { name: "Arbitrum", rpc: "https://arb1.arbitrum.io/rpc", nativeToken: "ETH", chainId: 42161 },
+  bsc: { name: "BSC", rpc: "https://bsc-dataseed.binance.org", nativeToken: "BNB", chainId: 56 },
+};
+
+async function fetchGasPrice(chainKey: string): Promise<{
+  chain: string;
+  chain_id: number;
+  native_token: string;
+  gas_price_gwei: number | null;
+  est_transfer_eth: number | null;
+  note: string | null;
+  error: string | null;
+}> {
+  const chain = GAS_CHAINS[chainKey];
+  try {
+    const res = await fetch(chain.rpc, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_gasPrice", params: [], id: 1 }),
+      signal: AbortSignal.timeout(4000),
+    });
+    const data = await res.json() as { result?: string };
+    if (!data.result) throw new Error("No result");
+    const weiBigInt = BigInt(data.result);
+    const gwei = Number(weiBigInt) / 1e9;
+    const estTransferEth = (gwei * 21000) / 1e9; // 21000 gas units * price
+    return {
+      chain: chain.name,
+      chain_id: chain.chainId,
+      native_token: chain.nativeToken,
+      gas_price_gwei: parseFloat(gwei.toFixed(4)),
+      est_transfer_eth: parseFloat(estTransferEth.toFixed(8)),
+      note: `~${estTransferEth.toFixed(6)} ${chain.nativeToken} per basic transfer (21000 gas)`,
+      error: null,
+    };
+  } catch {
+    return {
+      chain: chain.name,
+      chain_id: chain.chainId,
+      native_token: chain.nativeToken,
+      gas_price_gwei: null,
+      est_transfer_eth: null,
+      note: null,
+      error: "unavailable",
+    };
+  }
+}
+
+// ─── GET /gas — current gas prices across EVM chains ───
+
+chains.get("/gas", async (c) => {
+  c.header("Cache-Control", "public, max-age=15"); // 15s CDN cache — gas changes fast
+
+  const results = await Promise.allSettled(
+    Object.keys(GAS_CHAINS).map((key) => fetchGasPrice(key))
+  );
+
+  const gas = results.map((r) => r.status === "fulfilled" ? r.value : null).filter(Boolean);
+
+  return c.json({
+    gas_prices: gas,
+    timestamp: new Date().toISOString(),
+    source: "Direct RPC (eth_gasPrice)",
+    note: "Solana and Bitcoin use different fee models. Solana: ~0.000005 SOL per tx. Bitcoin: use mempool.space/api/v1/fees/recommended",
+    solana: { chain: "Solana", model: "per-signature fee", typical_lamports: 5000, typical_sol: 0.000005 },
+    bitcoin: { chain: "Bitcoin", model: "sat/vByte", check: "https://mempool.space/api/v1/fees/recommended" },
+  });
+});
+
+// ─── GET /gas/:chain — gas price for a specific chain ───
+
+chains.get("/gas/:chain", async (c) => {
+  const chainKey = c.req.param("chain").toLowerCase();
+  if (!GAS_CHAINS[chainKey]) {
+    return c.json({
+      error: "unsupported_chain",
+      message: `Supported chains: ${Object.keys(GAS_CHAINS).join(", ")}`,
+    }, 400);
+  }
+  c.header("Cache-Control", "public, max-age=15");
+  const result = await fetchGasPrice(chainKey);
+  return c.json(result);
+});
+
 // GET / — supported chains
 chains.get("/", (c) => {
   return c.json({
