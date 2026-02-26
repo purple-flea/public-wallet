@@ -15,6 +15,30 @@ runMigrations();
 const app = new Hono();
 app.use("*", cors());
 
+// ─── _info metadata middleware ───
+app.use("*", async (c, next) => {
+  await next();
+  const ct = c.res.headers.get("content-type") ?? "";
+  if (!ct.includes("application/json")) return;
+  try {
+    const body = await c.res.json();
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      body._info = {
+        service: "public-wallet",
+        docs: "https://wallet.purpleflea.com/llms.txt",
+        referral: "GET /v1/gossip for passive income info",
+        version: "1.0.0",
+      };
+      c.res = new Response(JSON.stringify(body), {
+        status: c.res.status,
+        headers: { "content-type": "application/json; charset=UTF-8" },
+      });
+    }
+  } catch {
+    // non-JSON or already consumed — skip
+  }
+});
+
 app.get("/health", (c) => c.json({ status: "ok", service: "public-wallet", version: "1.0.0" }));
 
 app.get("/", (c) => c.json({
