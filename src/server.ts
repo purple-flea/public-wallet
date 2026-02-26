@@ -39,7 +39,26 @@ app.use("*", async (c, next) => {
   }
 });
 
-app.get("/health", (c) => c.json({ status: "ok", service: "public-wallet", version: "1.0.0" }));
+const startTime = Date.now();
+app.get("/health", (c) => {
+  let dbStatus = "ok";
+  let registeredAgents = 0;
+  try {
+    const result = db.select({ count: sql<number>`count(*)` }).from(agents).get();
+    registeredAgents = result?.count ?? 0;
+  } catch {
+    dbStatus = "error";
+  }
+  return c.json({
+    status: "ok",
+    service: "public-wallet",
+    version: "1.0.0",
+    uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+    database: dbStatus,
+    registered_agents: registeredAgents,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 app.get("/", (c) => c.json({
   service: "Purple Flea Public Wallet",
