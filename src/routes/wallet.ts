@@ -13,9 +13,36 @@ import BIP32Factory from "bip32";
 import * as ecc from "tiny-secp256k1";
 import * as bitcoin from "bitcoinjs-lib";
 import bs58 from "bs58";
-import { createHash } from "crypto";
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from "crypto";
 import { deriveMoneroKeys } from "../chains/monero.js";
 import { getXmrBalance, sendXmr } from "../chains/xmr-wallet.js";
+
+// AES-256-GCM encryption for XMR spend key storage
+// Key is derived from a server-side secret + agentId to make per-agent encrypted blobs
+const XMR_ENC_SECRET = process.env.XMR_ENC_SECRET || "purple-flea-xmr-key-v1-fallback-secret-32b";
+
+function encryptXmrKey(plaintext: string, agentId: string): string {
+  const keyMaterial = createHash("sha256").update(XMR_ENC_SECRET + agentId).digest();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", keyMaterial, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Format: iv(12) + tag(16) + ciphertext, all as hex
+  return iv.toString("hex") + tag.toString("hex") + encrypted.toString("hex");
+}
+
+function decryptXmrKey(encrypted: string, agentId: string): string {
+  const keyMaterial = createHash("sha256").update(XMR_ENC_SECRET + agentId).digest();
+  const ivHex = encrypted.slice(0, 24);
+  const tagHex = encrypted.slice(24, 56);
+  const ctHex = encrypted.slice(56);
+  const iv = Buffer.from(ivHex, "hex");
+  const tag = Buffer.from(tagHex, "hex");
+  const ct = Buffer.from(ctHex, "hex");
+  const decipher = createDecipheriv("aes-256-gcm", keyMaterial, iv);
+  decipher.setAuthTag(tag);
+  return decipher.update(ct).toString("utf8") + decipher.final("utf8");
+}
 
 const bip32 = BIP32Factory(ecc);
 
@@ -76,13 +103,31 @@ wallet.post("/create", async (c) => {
   const xmrKeys = deriveMoneroKeys(Uint8Array.from(seed));
   addresses.monero = xmrKeys.address;
 
+  // Store XMR keys server-side so balance checks don't require passing view_key each time
+  // View key stored plaintext (read-only), spend key encrypted with AES-256-GCM
+  const agentId = c.get("agentId");
+  const encryptedSpendKey = encryptXmrKey(xmrKeys.privateSpendKey, agentId);
+  db.insert(schema.wallets).values({
+    agentId,
+    xmrAddress: xmrKeys.address,
+    xmrViewKey: xmrKeys.privateViewKey,
+    xmrSpendKeyEncrypted: encryptedSpendKey,
+  }).onConflictDoUpdate({
+    target: schema.wallets.agentId,
+    set: {
+      xmrAddress: xmrKeys.address,
+      xmrViewKey: xmrKeys.privateViewKey,
+      xmrSpendKeyEncrypted: encryptedSpendKey,
+    },
+  }).run();
+
   return c.json({
     mnemonic,
     addresses,
     monero_keys: {
       private_spend_key: xmrKeys.privateSpendKey,
       private_view_key: xmrKeys.privateViewKey,
-      note: "Save these keys. You need private_view_key to check balance and private_spend_key to send XMR.",
+      note: "XMR keys stored server-side for this agent — balance checks and sends work without passing keys each time. Save keys for offline use.",
     },
     warning: "This mnemonic is shown ONCE and never stored. Save it securely. Loss = loss of funds.",
     derivation_paths: {
@@ -335,11 +380,19 @@ wallet.get("/balance/:address", async (c) => {
   }
 
   if (chain === "monero") {
-    const viewKey = c.req.query("view_key");
+    // view_key can come from query param OR from stored wallet record
+    let viewKey = c.req.query("view_key");
+    if (!viewKey) {
+      const agentId = c.get("agentId");
+      const stored = db.select().from(schema.wallets).where(eq(schema.wallets.agentId, agentId)).get();
+      if (stored?.xmrViewKey) {
+        viewKey = stored.xmrViewKey;
+      }
+    }
     if (!viewKey) {
       return c.json({
         error: "view_key_required",
-        message: "Monero balance requires your private_view_key. Pass it as ?view_key=<hex>. Your view key was returned when you created your wallet via POST /v1/wallet/create.",
+        message: "Monero balance requires your private_view_key. Either POST /v1/wallet/create first (keys auto-stored) or pass ?view_key=<hex>.",
         example: `GET /v1/wallet/balance/${address}?chain=monero&view_key=<your_private_view_key>`,
       }, 400);
     }
@@ -496,20 +549,37 @@ wallet.post("/send", async (c) => {
   }
 
   if (chain === "monero") {
-    const { view_key, spend_key, from } = body as { view_key?: string; spend_key?: string; from?: string };
-    if (!view_key || !spend_key || !from) {
+    const { view_key: bodyViewKey, spend_key: bodySpendKey, from } = body as { view_key?: string; spend_key?: string; from?: string };
+
+    // Try to look up stored keys if not provided in request body
+    let resolvedViewKey = bodyViewKey;
+    let resolvedSpendKey = bodySpendKey;
+    let resolvedFrom = from;
+
+    const agentId = c.get("agentId");
+    const stored = db.select().from(schema.wallets).where(eq(schema.wallets.agentId, agentId)).get();
+    if (stored) {
+      if (!resolvedViewKey && stored.xmrViewKey) resolvedViewKey = stored.xmrViewKey;
+      if (!resolvedSpendKey && stored.xmrSpendKeyEncrypted) {
+        try { resolvedSpendKey = decryptXmrKey(stored.xmrSpendKeyEncrypted, agentId); } catch (_) {}
+      }
+      if (!resolvedFrom && stored.xmrAddress) resolvedFrom = stored.xmrAddress;
+    }
+
+    if (!resolvedViewKey || !resolvedSpendKey || !resolvedFrom) {
       return c.json({
         error: "keys_required",
-        message: "Monero send requires from (your primary address), view_key, and spend_key in the request body. These were returned when you created your wallet via POST /v1/wallet/create.",
+        message: "Monero send requires from (your primary address), view_key, and spend_key. POST /v1/wallet/create first to auto-store keys, or pass them in the request body.",
         required_body_fields: ["chain", "from", "to", "amount", "view_key", "spend_key"],
+        tip: "If you used POST /v1/wallet/create, keys are auto-stored — just provide chain, to, and amount.",
       }, 400);
     }
     try {
-      const result = await sendXmr(from, view_key, spend_key, to, amount);
+      const result = await sendXmr(resolvedFrom, resolvedViewKey, resolvedSpendKey, to, amount);
       return c.json({
         tx_hash: result.tx_hash,
         chain: "monero",
-        from,
+        from: resolvedFrom,
         to,
         amount: result.amount_xmr,
         fee: result.fee_xmr,
