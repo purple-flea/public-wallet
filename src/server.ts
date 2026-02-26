@@ -15,6 +15,34 @@ runMigrations();
 const app = new Hono();
 app.use("*", cors());
 
+// ─── In-process rate limiter (sliding window) ───
+const rateLimitBuckets = new Map<string, { count: number; windowStart: number }>();
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [key, bucket] of rateLimitBuckets) {
+    if (bucket.windowStart < cutoff) rateLimitBuckets.delete(key);
+  }
+}, 300_000);
+
+function rateLimit(maxRequests: number, windowMs: number) {
+  return async (c: Parameters<Parameters<typeof app.use>[1]>[0], next: () => Promise<void>) => {
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+      || c.req.header("x-real-ip") || "unknown";
+    const key = `${c.req.path}:${ip}`;
+    const now = Date.now();
+    const bucket = rateLimitBuckets.get(key);
+    if (!bucket || now - bucket.windowStart > windowMs) {
+      rateLimitBuckets.set(key, { count: 1, windowStart: now });
+    } else {
+      bucket.count++;
+      if (bucket.count > maxRequests) {
+        return c.json({ error: "rate_limited", message: `Too many requests. Limit: ${maxRequests} per ${windowMs / 1000}s` }, 429);
+      }
+    }
+    await next();
+  };
+}
+
 // ─── _info metadata middleware ───
 app.use("*", async (c, next) => {
   await next();
@@ -68,6 +96,13 @@ app.get("/", (c) => c.json({
 }));
 
 const v1 = new Hono();
+
+// Rate limits on sensitive endpoints
+v1.use("/auth/register", rateLimit(10, 60_000));         // 10 registrations/min per IP
+v1.use("/referral/withdraw", rateLimit(5, 60_000));      // 5 withdrawals/min per IP
+v1.use("/wallet/swap", rateLimit(30, 60_000));           // 30 swaps/min per IP
+v1.use("/wallet/send", rateLimit(20, 60_000));           // 20 sends/min per IP
+
 v1.route("/auth", auth);
 v1.route("/wallet", wallet);
 v1.route("/wallet/swap", swap);
