@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { authMiddleware } from "../middleware/auth.js";
 import { SUPPORTED_CHAINS, type ChainName } from "../chains/config.js";
 import type { AppEnv } from "../types.js";
+import { db } from "../db/index.js";
+import * as schema from "../db/schema.js";
+import { eq, desc, sql } from "drizzle-orm";
 import * as bip39 from "bip39";
 import { ethers } from "ethers";
 import { derivePath } from "ed25519-hd-key";
@@ -789,6 +792,105 @@ wallet.post("/multi-send", async (c) => {
     failed,
     results,
   }, sent > 0 ? 200 : 400);
+});
+
+// GET /activity — unified activity feed: swaps + referral earnings + referral withdrawals
+wallet.get("/activity", (c) => {
+  const agentId = c.get("agentId") as string;
+  const limit = Math.min(parseInt(c.req.query("limit") || "50"), 100);
+  const offset = parseInt(c.req.query("offset") || "0");
+  const type = c.req.query("type"); // optional filter: swaps | referral_earnings | referral_withdrawals
+
+  // Swaps
+  const swapEvents: Array<{
+    type: string; id: string; created_at: number;
+    from_chain?: string; to_chain?: string; from_token?: string; to_token?: string;
+    from_amount?: string; to_address?: string; status?: string; fee_amount?: number;
+    amount?: number; commission?: number;
+    address?: string; chain?: string; tx_hash?: string | null;
+    order_id?: string;
+  }> = (!type || type === "swaps")
+    ? db.select().from(schema.swaps)
+        .where(eq(schema.swaps.agentId, agentId))
+        .all()
+        .map(s => ({
+          type: "swap",
+          id: s.id,
+          created_at: s.createdAt,
+          from_chain: s.fromChain,
+          to_chain: s.toChain,
+          from_token: s.fromToken,
+          to_token: s.toToken,
+          from_amount: s.fromAmount,
+          to_address: s.toAddress,
+          status: s.status,
+          fee_amount: s.feeAmount,
+          order_id: s.orderId,
+        }))
+    : [];
+
+  // Referral earnings
+  const earningEvents = (!type || type === "referral_earnings")
+    ? db.select().from(schema.referralEarnings)
+        .where(eq(schema.referralEarnings.referrerId, agentId))
+        .all()
+        .map(e => ({
+          type: "referral_earning",
+          id: e.id,
+          created_at: e.createdAt,
+          referred_agent: e.referredId,
+          amount: e.commissionAmount,
+          fee_amount: e.feeAmount,
+          swap_id: e.swapId,
+        }))
+    : [];
+
+  // Referral withdrawals
+  const withdrawalEvents = (!type || type === "referral_withdrawals")
+    ? db.select().from(schema.referralWithdrawals)
+        .where(eq(schema.referralWithdrawals.referrerId, agentId))
+        .all()
+        .map(w => ({
+          type: "referral_withdrawal",
+          id: w.id,
+          created_at: w.createdAt,
+          amount: w.amount,
+          address: w.address,
+          chain: w.chain,
+          status: w.status,
+          tx_hash: w.txHash ?? null,
+        }))
+    : [];
+
+  // Merge and sort by created_at desc
+  const all = [...swapEvents, ...earningEvents, ...withdrawalEvents]
+    .sort((a, b) => b.created_at - a.created_at);
+
+  const total = all.length;
+  const page = all.slice(offset, offset + limit);
+
+  // Summary stats
+  const totalSwaps = swapEvents.length;
+  const totalFeesPaid = swapEvents.reduce((s, e) => s + (e.fee_amount ?? 0), 0);
+  const totalReferralEarned = earningEvents.reduce((s, e) => s + (e.amount ?? 0), 0);
+  const totalWithdrawn = withdrawalEvents
+    .filter(w => w.status === "completed")
+    .reduce((s, w) => s + (w.amount ?? 0), 0);
+
+  return c.json({
+    total,
+    limit,
+    offset,
+    has_more: offset + limit < total,
+    summary: {
+      total_swaps: totalSwaps,
+      total_fees_paid: Math.round(totalFeesPaid * 100) / 100,
+      total_referral_earned: Math.round(totalReferralEarned * 100) / 100,
+      total_withdrawn: Math.round(totalWithdrawn * 100) / 100,
+    },
+    events: page,
+    filter_options: "Add ?type=swaps|referral_earnings|referral_withdrawals to filter",
+  });
 });
 
 export default wallet;
