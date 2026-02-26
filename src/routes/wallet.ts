@@ -959,6 +959,105 @@ wallet.get("/tokens/:address", async (c) => {
   });
 });
 
+// GET /nfts/:address — NFT holdings for an EVM address on Base or Ethereum
+wallet.get("/nfts/:address", async (c) => {
+  const address = c.req.param("address");
+  const chain = (c.req.query("chain") || "base").toLowerCase();
+  const limit = Math.min(parseInt(c.req.query("limit") || "20"), 100);
+
+  if (!["ethereum", "base"].includes(chain)) {
+    return c.json({
+      error: "unsupported_chain",
+      message: "NFT lookup supports: ethereum, base",
+      supported: ["ethereum", "base"],
+    }, 400);
+  }
+
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return c.json({ error: "invalid_address", message: "Provide a valid EVM address (0x...)" }, 400);
+  }
+
+  // Use Alchemy NFT API (free, no key needed for basic queries via public endpoint)
+  // Fallback: parse ERC-721/ERC-1155 Transfer events via eth_getLogs if needed
+  const alchemyBase: Record<string, string> = {
+    ethereum: "https://eth-mainnet.g.alchemy.com/nft/v3/demo",
+    base: "https://base-mainnet.g.alchemy.com/nft/v3/demo",
+  };
+
+  const baseUrl = alchemyBase[chain];
+
+  try {
+    const url = `${baseUrl}/getNFTsForOwner?owner=${address}&withMetadata=true&pageSize=${limit}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Alchemy API returned ${res.status}`);
+    }
+
+    const data = await res.json() as any;
+    const nfts = (data.ownedNfts ?? []).slice(0, limit);
+
+    const formatted = nfts.map((nft: any) => ({
+      contract: nft.contract?.address ?? null,
+      token_id: nft.tokenId ?? null,
+      name: nft.name ?? nft.contract?.name ?? "Unknown NFT",
+      collection: nft.contract?.name ?? null,
+      token_type: nft.tokenType ?? null, // ERC721 | ERC1155
+      image_url: nft.image?.cachedUrl ?? nft.image?.originalUrl ?? null,
+      description: nft.description ?? null,
+      floor_price_eth: nft.contract?.openSeaMetadata?.floorPrice ?? null,
+      opensea_url: nft.contract?.openSeaMetadata?.collectionSlug
+        ? `https://opensea.io/collection/${nft.contract.openSeaMetadata.collectionSlug}`
+        : null,
+    }));
+
+    // Group by collection
+    const byCollection: Record<string, number> = {};
+    for (const nft of formatted) {
+      const col = nft.collection ?? "Unknown";
+      byCollection[col] = (byCollection[col] ?? 0) + 1;
+    }
+
+    const totalCount = data.totalCount ?? nfts.length;
+
+    return c.json({
+      address,
+      chain,
+      total_nfts: totalCount,
+      showing: formatted.length,
+      nfts: formatted,
+      collections: Object.entries(byCollection)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ collection: name, count })),
+      pagination: {
+        has_more: totalCount > formatted.length,
+        next_page: data.pageKey ? `GET /v1/wallet/nfts/${address}?chain=${chain}&page_key=${data.pageKey}` : null,
+      },
+      explorer: chain === "base"
+        ? `https://basescan.org/address/${address}#inventory`
+        : `https://etherscan.io/address/${address}#inventory`,
+      tip: "Filter by collection: GET /v1/wallet/nfts/:address?chain=base&limit=50",
+    });
+  } catch (err: any) {
+    // Graceful degradation — return empty result with helpful message
+    return c.json({
+      address,
+      chain,
+      total_nfts: null,
+      nfts: [],
+      collections: [],
+      error: "nft_lookup_failed",
+      message: err.message,
+      alternative: chain === "base"
+        ? `https://basescan.org/address/${address}#inventory`
+        : `https://etherscan.io/address/${address}#inventory`,
+    }, 200); // 200 so agents don't bail — they can handle empty gracefully
+  }
+});
+
 // GET /activity — unified activity feed: swaps + referral earnings + referral withdrawals
 wallet.get("/activity", (c) => {
   const agentId = c.get("agentId") as string;
