@@ -9,6 +9,7 @@ import wallet from "./routes/wallet.js";
 import swap from "./routes/swap.js";
 import chains from "./routes/chains.js";
 import referral from "./routes/referral.js";
+import alerts from "./routes/alerts.js";
 
 runMigrations();
 
@@ -133,6 +134,7 @@ v1.route("/wallet/chains", chains);  // public chain/token info — no auth need
 v1.route("/wallet/swap", swap);
 v1.route("/wallet", wallet);
 v1.route("/referral", referral);
+v1.route("/alerts", alerts);
 
 // ─── Public stats (no auth) ───
 v1.get("/public-stats", (c) => {

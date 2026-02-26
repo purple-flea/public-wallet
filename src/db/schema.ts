@@ -76,6 +76,22 @@ export const addressBook = sqliteTable("address_book", {
   index("idx_address_book_agent").on(table.agentId),
 ]);
 
+export const priceAlerts = sqliteTable("price_alerts", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  coin: text("coin").notNull(),               // e.g. "bitcoin", "ethereum", "solana"
+  condition: text("condition").notNull(),     // "above" | "below"
+  targetPrice: real("target_price").notNull(),
+  status: text("status").default("active").notNull(), // active | triggered | deleted
+  triggeredAt: integer("triggered_at"),
+  triggeredPrice: real("triggered_price"),
+  note: text("note"),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_price_alerts_agent").on(table.agentId),
+  index("idx_price_alerts_status").on(table.status),
+]);
+
 export const treasuryLedger = sqliteTable("treasury_ledger", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
@@ -86,3 +102,12 @@ export const treasuryLedger = sqliteTable("treasury_ledger", {
 }, (table) => [
   index("idx_treasury_created").on(table.createdAt),
 ]);
+
+// Wallet key storage — stores XMR keys per agent (view key plaintext, spend key AES-encrypted)
+export const wallets = sqliteTable("wallets", {
+  agentId: text("agent_id").primaryKey().references(() => agents.id),
+  xmrAddress: text("xmr_address"),
+  xmrViewKey: text("xmr_view_key"),
+  xmrSpendKeyEncrypted: text("xmr_spend_key_encrypted"), // AES-256-GCM encrypted hex string
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+});

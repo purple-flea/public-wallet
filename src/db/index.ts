@@ -64,6 +64,24 @@ CREATE INDEX IF NOT EXISTS idx_swaps_agent ON swaps(agent_id);
 CREATE INDEX IF NOT EXISTS idx_swaps_order ON swaps(order_id);
 CREATE INDEX IF NOT EXISTS idx_ref_earnings_referrer ON referral_earnings(referrer_id);
 CREATE INDEX IF NOT EXISTS idx_treasury_created ON treasury_ledger(created_at);
+CREATE TABLE IF NOT EXISTS price_alerts (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id),
+  coin TEXT NOT NULL, condition TEXT NOT NULL,
+  target_price REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  triggered_at INTEGER, triggered_price REAL,
+  note TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_price_alerts_agent ON price_alerts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_price_alerts_status ON price_alerts(status);
+CREATE TABLE IF NOT EXISTS wallets (
+  agent_id TEXT PRIMARY KEY REFERENCES agents(id),
+  xmr_address TEXT,
+  xmr_view_key TEXT,
+  xmr_spend_key_encrypted TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
 `;
 
 export function runMigrations() {
