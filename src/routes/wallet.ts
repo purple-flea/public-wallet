@@ -1570,6 +1570,125 @@ wallet.get("/swap-analytics", authMiddleware, async (c) => {
   });
 });
 
+// ─── USDC multi-chain balance aggregator ───
+
+wallet.get("/usdc-balance", async (c) => {
+  // USDC contract addresses per chain
+  const USDC_CONTRACTS: Record<string, { address: string; decimals: number; rpc?: string }> = {
+    ethereum: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, rpc: "https://eth.llamarpc.com" },
+    base: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, rpc: "https://mainnet.base.org" },
+    arbitrum: { address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", decimals: 6, rpc: "https://arb1.arbitrum.io/rpc" },
+    bsc: { address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", decimals: 18, rpc: "https://bsc-dataseed1.bnbchain.org" },
+    solana: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6 },
+    tron: { address: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8", decimals: 6 },
+  };
+
+  // Collect wallet addresses from query params
+  const addressesToCheck: Array<{ chain: string; wallet: string }> = [];
+  for (const chain of Object.keys(USDC_CONTRACTS)) {
+    const addr = c.req.query(chain);
+    if (addr) addressesToCheck.push({ chain, wallet: addr });
+  }
+
+  if (addressesToCheck.length === 0) {
+    return c.json({
+      error: "no_addresses",
+      message: "Provide at least one address as query param",
+      example: "GET /v1/wallet/usdc-balance?ethereum=0x1234...&base=0x1234...&solana=YourSolAddr",
+      supported_chains: Object.keys(USDC_CONTRACTS),
+      usdc_contracts: Object.fromEntries(Object.entries(USDC_CONTRACTS).map(([ch, c]) => [ch, c.address])),
+    }, 400);
+  }
+
+  // ERC-20 balanceOf ABI call: keccak256("balanceOf(address)") = 0x70a08231
+  function buildBalanceOfCalldata(walletAddress: string): string {
+    const addr = walletAddress.toLowerCase().replace("0x", "").padStart(64, "0");
+    return "0x70a08231" + addr;
+  }
+
+  const results = await Promise.all(addressesToCheck.map(async ({ chain, wallet }) => {
+    const config = USDC_CONTRACTS[chain];
+    let balance = 0;
+    let error: string | null = null;
+
+    try {
+      if (chain === "solana") {
+        // Use getTokenAccountsByOwner for SPL tokens
+        const rpcRes = await fetch("https://api.mainnet-beta.solana.com", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            method: "getTokenAccountsByOwner",
+            params: [
+              wallet,
+              { mint: config.address },
+              { encoding: "jsonParsed" },
+            ],
+          }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const data = await rpcRes.json() as any;
+        const accounts = data.result?.value ?? [];
+        balance = accounts.reduce((sum: number, acc: any) => {
+          const amount = acc.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? 0;
+          return sum + amount;
+        }, 0);
+      } else if (chain === "tron") {
+        // TRC-20 balanceOf via TronGrid
+        const res = await fetch(`https://api.trongrid.io/v1/accounts/${wallet}/tokens?only_confirmed=true`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) {
+          const data = await res.json() as any;
+          const usdcToken = (data.data ?? []).find((t: any) =>
+            t.tokenId === config.address || t.token_id === config.address
+          );
+          balance = usdcToken ? (usdcToken.balance ?? 0) / Math.pow(10, config.decimals) : 0;
+        }
+      } else {
+        // EVM chains — eth_call balanceOf
+        const rpc = config.rpc!;
+        const callRes = await fetch(rpc, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "eth_call",
+            params: [{ to: config.address, data: buildBalanceOfCalldata(wallet) }, "latest"],
+          }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const callData = await callRes.json() as any;
+        if (callData.result && callData.result !== "0x") {
+          const raw = BigInt(callData.result);
+          balance = Number(raw) / Math.pow(10, config.decimals);
+        }
+      }
+    } catch (e: any) {
+      error = e.message;
+    }
+
+    return {
+      chain,
+      wallet_address: wallet,
+      usdc_balance: Math.round(balance * 1e6) / 1e6,
+      usdc_contract: config.address,
+      ...(error ? { error } : {}),
+    };
+  }));
+
+  const totalUsdc = results.reduce((sum, r) => sum + (r.usdc_balance ?? 0), 0);
+
+  return c.json({
+    total_usdc: Math.round(totalUsdc * 1e6) / 1e6,
+    total_usd: Math.round(totalUsdc * 100) / 100, // USDC ≈ $1
+    chain_count: results.length,
+    balances: results,
+    note: "USDC only (not USDT or other stablecoins). BSC USDC has 18 decimals (non-standard). Solana queries SPL token accounts.",
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ─── Portfolio tracker (uses address book) ───
 
 // GET /portfolio — live USD value across all saved addresses
