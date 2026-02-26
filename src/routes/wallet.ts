@@ -571,6 +571,129 @@ wallet.get("/price", async (c) => {
   }
 });
 
+// GET /portfolio-value?btc=bc1q...&eth=0x...&sol=So1... — USD value of multiple addresses
+wallet.get("/portfolio-value", async (c) => {
+  const chainNativeTokens: Record<string, { symbol: string; cgId: string }> = {
+    ethereum: { symbol: "ETH", cgId: "ethereum" },
+    base: { symbol: "ETH", cgId: "ethereum" }, // Base uses ETH
+    solana: { symbol: "SOL", cgId: "solana" },
+    bitcoin: { symbol: "BTC", cgId: "bitcoin" },
+    tron: { symbol: "TRX", cgId: "tron" },
+  };
+
+  // Parse addresses from query params: ?ethereum=0x...&bitcoin=bc1q...&solana=Sol...
+  const addressesToCheck: Array<{ chain: string; address: string }> = [];
+  for (const chain of Object.keys(chainNativeTokens)) {
+    const addr = c.req.query(chain);
+    if (addr) addressesToCheck.push({ chain, address: addr });
+  }
+
+  if (addressesToCheck.length === 0) {
+    return c.json({
+      error: "no_addresses",
+      message: "Provide at least one address as query param",
+      example: "GET /v1/wallet/portfolio-value?ethereum=0x1234...&bitcoin=bc1q...&solana=So1...",
+      supported_chains: Object.keys(chainNativeTokens),
+    }, 400);
+  }
+
+  // Fetch all unique token prices from CoinGecko in one call
+  const uniqueCgIds = [...new Set(addressesToCheck.map(a => chainNativeTokens[a.chain].cgId))];
+  let prices: Record<string, number> = {};
+
+  try {
+    const cgRes = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${uniqueCgIds.join(",")}&vs_currencies=usd`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (cgRes.ok) {
+      const cgData = await cgRes.json() as any;
+      for (const [cgId, data] of Object.entries(cgData)) {
+        prices[cgId] = (data as any).usd ?? 0;
+      }
+    }
+  } catch {
+    // Continue without prices — return balances only
+  }
+
+  // Fetch balances in parallel (best-effort)
+  const results = await Promise.all(addressesToCheck.map(async ({ chain, address }) => {
+    const { symbol, cgId } = chainNativeTokens[chain];
+    let amount = 0;
+    let error: string | null = null;
+
+    try {
+      if (chain === "bitcoin") {
+        const res = await fetch(`https://mempool.space/api/address/${address}`);
+        if (res.ok) {
+          const data = await res.json() as any;
+          const sats = (data.chain_stats?.funded_txo_sum ?? 0) - (data.chain_stats?.spent_txo_sum ?? 0)
+            + (data.mempool_stats?.funded_txo_sum ?? 0) - (data.mempool_stats?.spent_txo_sum ?? 0);
+          amount = sats / 1e8;
+        }
+      } else if (chain === "solana") {
+        const rpcRes = await fetch("https://api.mainnet-beta.solana.com", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }),
+        });
+        const rpcData = await rpcRes.json() as any;
+        amount = (rpcData.result?.value ?? 0) / 1e9;
+      } else if (chain === "tron") {
+        const tronRes = await fetch("https://api.trongrid.io/wallet/getaccount", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address, visible: true }),
+        });
+        const tronData = await tronRes.json() as any;
+        amount = (tronData.balance ?? 0) / 1_000_000;
+      } else {
+        // EVM — use public RPC
+        const rpcUrls: Record<string, string> = {
+          ethereum: "https://eth.public-rpc.com",
+          base: "https://mainnet.base.org",
+        };
+        const rpc = rpcUrls[chain];
+        if (rpc) {
+          const rpcRes = await fetch(rpc, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBalance", params: [address, "latest"], id: 1 }),
+          });
+          const rpcData = await rpcRes.json() as any;
+          if (rpcData.result) {
+            amount = parseInt(rpcData.result, 16) / 1e18;
+          }
+        }
+      }
+    } catch (e: any) {
+      error = e.message;
+    }
+
+    const priceUsd = prices[cgId] ?? null;
+    const valueUsd = priceUsd !== null ? Math.round(amount * priceUsd * 100) / 100 : null;
+
+    return {
+      chain,
+      address,
+      symbol,
+      balance: Math.round(amount * 1e8) / 1e8,
+      price_usd: priceUsd,
+      value_usd: valueUsd,
+      ...(error ? { error } : {}),
+    };
+  }));
+
+  const totalValueUsd = results.reduce((sum, r) => sum + (r.value_usd ?? 0), 0);
+
+  return c.json({
+    total_value_usd: Math.round(totalValueUsd * 100) / 100,
+    wallets: results,
+    timestamp: new Date().toISOString(),
+    note: "Native token balances only. ERC-20 token balances not included in total.",
+  });
+});
+
 // POST /multi-send — fan out one private key to multiple recipients in one call
 wallet.post("/multi-send", async (c) => {
   const body = await c.req.json();
