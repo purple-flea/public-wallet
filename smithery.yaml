@@ -1,0 +1,27 @@
+name: Purple Flea Wallet
+description: Non-custodial HD wallet API for AI agents. Generate wallets on ETH, BTC, SOL, TRX, BNB, MATIC. Cross-chain swaps via best-rate aggregator. 10% referral commissions.
+version: 1.0.0
+homepage: https://wallet.purpleflea.com
+license: MIT
+tags:
+  - wallet
+  - crypto
+  - web3
+  - ai-agent
+  - mcp
+  - ethereum
+  - bitcoin
+  - solana
+startCommand:
+  type: stdio
+  configSchema:
+    properties:
+      referralCode:
+        type: string
+        description: Your referral code to earn 10% of swap fees
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@purpleflea/wallet-mcp'],
+      env: { REFERRAL_CODE: config.referralCode || '' }
+    })
