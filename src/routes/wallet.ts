@@ -46,6 +46,19 @@ function decryptXmrKey(encrypted: string, agentId: string): string {
 
 const bip32 = BIP32Factory(ecc);
 
+// Singleton EVM providers — reuse across requests to avoid per-request timer/socket leaks.
+// ethers.JsonRpcProvider created per-request accumulates internal polling intervals that are
+// never cleared, causing the ~300-500MB memory growth. Singletons are safe here because we
+// only use them for read calls (getBalance) and the JsonRpcProvider is stateless otherwise.
+const _evmProviders = new Map<string, ethers.JsonRpcProvider>();
+function getEvmProvider(rpcUrl: string): ethers.JsonRpcProvider {
+  let p = _evmProviders.get(rpcUrl);
+  if (!p) {
+    p = new ethers.JsonRpcProvider(rpcUrl);
+    _evmProviders.set(rpcUrl, p);
+  }
+  return p;
+}
 
 // Tron address helpers
 function tronBase58ToHex(address: string): string {
@@ -438,7 +451,7 @@ wallet.get("/balance/:address", async (c) => {
 
   // EVM chains (ethereum, base)
   try {
-    const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
+    const provider = getEvmProvider(chainConfig.rpcUrl);
     const balance = await provider.getBalance(address);
     return c.json({
       address,
@@ -611,7 +624,7 @@ wallet.post("/send", async (c) => {
 
   // EVM chains
   try {
-    const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
+    const provider = getEvmProvider(chainConfig.rpcUrl);
     const signer = new ethers.Wallet(private_key, provider);
 
     if (token) {
@@ -955,7 +968,7 @@ wallet.post("/multi-send", async (c) => {
   }
 
   // EVM multi-send: sequential sends with nonce management
-  const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
+  const provider = getEvmProvider(chainConfig.rpcUrl);
   const signer = new ethers.Wallet(private_key, provider);
 
   let nonce = await provider.getTransactionCount(signer.address, "latest");

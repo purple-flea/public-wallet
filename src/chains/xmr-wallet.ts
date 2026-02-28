@@ -22,8 +22,10 @@ const DAEMON_URLS = [
 let activeDaemonUrl = DAEMON_URLS[0];
 
 // In-memory balance cache: address → { balance_xmr, cached_at_ms }
+// Bounded to MAX_CACHE_SIZE entries. When full, evict oldest entry (insertion-order LRU).
 const balanceCache = new Map<string, { balance_xmr: string; cached_at: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_SIZE = 500; // prevent unbounded growth
 
 // Concurrency lock: monero-ts WASM is not safe for simultaneous createWalletFull calls
 let xmrLocked = false;
@@ -124,6 +126,11 @@ export async function getXmrBalance(
     const balance: bigint = await wallet.getBalance();
     const xmr = (Number(balance) / 1e12).toFixed(12);
 
+    // Evict oldest entry if cache is at capacity (Map preserves insertion order)
+    if (balanceCache.size >= MAX_CACHE_SIZE) {
+      const oldestKey = balanceCache.keys().next().value;
+      if (oldestKey !== undefined) balanceCache.delete(oldestKey);
+    }
     balanceCache.set(primaryAddress, { balance_xmr: xmr, cached_at: Date.now() });
 
     return {

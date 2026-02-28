@@ -36,12 +36,22 @@ app.notFound((c) => c.json({
 
 // ─── In-process rate limiter (sliding window) ───
 const rateLimitBuckets = new Map<string, { count: number; windowStart: number }>();
+const RATE_LIMIT_MAX_BUCKETS = 10_000; // hard cap to prevent unbounded growth
 setInterval(() => {
   const cutoff = Date.now() - 120_000;
   for (const [key, bucket] of rateLimitBuckets) {
     if (bucket.windowStart < cutoff) rateLimitBuckets.delete(key);
   }
-}, 300_000);
+  // Safety valve: if still too large after TTL eviction, drop oldest half
+  if (rateLimitBuckets.size > RATE_LIMIT_MAX_BUCKETS) {
+    let i = 0;
+    const half = Math.floor(rateLimitBuckets.size / 2);
+    for (const key of rateLimitBuckets.keys()) {
+      if (i++ >= half) break;
+      rateLimitBuckets.delete(key);
+    }
+  }
+}, 60_000); // run cleanup every 60s (was 300s — more frequent = smaller peak size)
 
 function rateLimit(maxRequests: number, windowMs: number) {
   return async (c: Parameters<Parameters<typeof app.use>[1]>[0], next: () => Promise<void>) => {
@@ -51,6 +61,12 @@ function rateLimit(maxRequests: number, windowMs: number) {
     const now = Date.now();
     const bucket = rateLimitBuckets.get(key);
     if (!bucket || now - bucket.windowStart > windowMs) {
+      // Enforce bucket cap before inserting a new entry
+      if (!bucket && rateLimitBuckets.size >= RATE_LIMIT_MAX_BUCKETS) {
+        // Evict oldest entry to stay within cap
+        const oldestKey = rateLimitBuckets.keys().next().value;
+        if (oldestKey !== undefined) rateLimitBuckets.delete(oldestKey);
+      }
       rateLimitBuckets.set(key, { count: 1, windowStart: now });
     } else {
       bucket.count++;
