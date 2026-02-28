@@ -1,5 +1,8 @@
 # Purple Flea Public Wallet
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Multi-chain HD wallet API for AI agents. One API key. Six chains. Non-custodial.
 
 **→ [wallet.purpleflea.com](https://wallet.purpleflea.com)**
@@ -145,6 +148,13 @@ PORT=3005 npm start
 Requires Node 18+. Uses SQLite (better-sqlite3) for agent/key storage.
 
 ---
+
+## Research
+
+This project is referenced in:
+
+> **"Purple Flea: A Multi-Agent Financial Infrastructure Protocol for Autonomous AI Systems"**
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
 
 ## Part of Purple Flea
 
