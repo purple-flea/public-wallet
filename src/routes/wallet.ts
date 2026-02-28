@@ -984,16 +984,19 @@ wallet.post("/multi-send", async (c) => {
 
   for (const { to, amount } of recipients) {
     try {
+      // Coerce to string — callers sometimes pass numbers, which ethers v6
+      // cannot parse and throws "invalid BytesLike value".
+      const amountStr = String(amount);
       let txHash: string;
 
       if (token) {
         const erc20Abi = ["function transfer(address to, uint256 amount) returns (bool)"];
         const contract = new ethers.Contract(token, erc20Abi, signer);
-        const tx = await contract.transfer(to, ethers.parseUnits(amount, 6), { nonce });
+        const tx = await contract.transfer(to, ethers.parseUnits(amountStr, 6), { nonce });
         const receipt = await tx.wait();
         txHash = receipt.hash;
       } else {
-        const tx = await signer.sendTransaction({ to, value: ethers.parseEther(amount), nonce });
+        const tx = await signer.sendTransaction({ to, value: ethers.parseEther(amountStr), nonce });
         const receipt = await tx.wait();
         txHash = receipt!.hash;
       }
