@@ -103,21 +103,40 @@ wallet.post("/create", async (c) => {
   const xmrKeys = deriveMoneroKeys(Uint8Array.from(seed));
   addresses.monero = xmrKeys.address;
 
-  // Store XMR keys server-side so balance checks don't require passing view_key each time
-  // View key stored plaintext (read-only), spend key encrypted with AES-256-GCM
+  // Store all keys server-side (XMR view key plaintext, all others AES-256-GCM encrypted)
   const agentId = c.get("agentId");
   const encryptedSpendKey = encryptXmrKey(xmrKeys.privateSpendKey, agentId);
+
+  // ETH/Base private key (hex, no 0x prefix)
+  const ethPrivKeyHex = Buffer.from(ethChild.privateKey!).toString("hex");
+  // Solana private key (base58-encoded full 64-byte secret key)
+  const solPrivKeyB58 = bs58.encode(solKeypair.secretKey);
+  // Bitcoin private key (WIF)
+  const btcWif = btcChild.toWIF();
+  // Tron private key (hex, no 0x prefix — same format as ETH key)
+  const tronPrivKeyHex = Buffer.from(tronChild.privateKey!).toString("hex");
+
   db.insert(schema.wallets).values({
     agentId,
     xmrAddress: xmrKeys.address,
     xmrViewKey: xmrKeys.privateViewKey,
     xmrSpendKeyEncrypted: encryptedSpendKey,
+    ethPrivateKeyEncrypted: encryptXmrKey(ethPrivKeyHex, agentId),
+    solPrivateKeyEncrypted: encryptXmrKey(solPrivKeyB58, agentId),
+    btcPrivateKeyEncrypted: encryptXmrKey(btcWif, agentId),
+    tronPrivateKeyEncrypted: encryptXmrKey(tronPrivKeyHex, agentId),
+    mnemonicEncrypted: encryptXmrKey(mnemonic, agentId),
   }).onConflictDoUpdate({
     target: schema.wallets.agentId,
     set: {
       xmrAddress: xmrKeys.address,
       xmrViewKey: xmrKeys.privateViewKey,
       xmrSpendKeyEncrypted: encryptedSpendKey,
+      ethPrivateKeyEncrypted: encryptXmrKey(ethPrivKeyHex, agentId),
+      solPrivateKeyEncrypted: encryptXmrKey(solPrivKeyB58, agentId),
+      btcPrivateKeyEncrypted: encryptXmrKey(btcWif, agentId),
+      tronPrivateKeyEncrypted: encryptXmrKey(tronPrivKeyHex, agentId),
+      mnemonicEncrypted: encryptXmrKey(mnemonic, agentId),
     },
   }).run();
 
@@ -2073,6 +2092,70 @@ wallet.delete("/portfolio/addresses/:id", authMiddleware, async (c) => {
     .run();
 
   return c.json({ success: true, message: `Address "${existing.label}" (${existing.chain}: ${existing.address}) removed from portfolio.` });
+});
+
+// GET /export — return stored private keys for all chains (agent's own keys only)
+wallet.get("/export", async (c) => {
+  const agentId = c.get("agentId");
+
+  const stored = db.select().from(schema.wallets).where(eq(schema.wallets.agentId, agentId)).get();
+  if (!stored) {
+    return c.json({
+      error: "no_wallet",
+      message: "No wallet found. Create one first with POST /v1/wallet/create",
+    }, 404);
+  }
+
+  // Helper to safely decrypt a field; returns null on failure
+  const tryDecrypt = (enc: string | null | undefined): string | null => {
+    if (!enc) return null;
+    try { return decryptXmrKey(enc, agentId); } catch { return null; }
+  };
+
+  const xmrSpendKey = tryDecrypt(stored.xmrSpendKeyEncrypted);
+  const ethPrivKey   = tryDecrypt(stored.ethPrivateKeyEncrypted);
+  const solPrivKey   = tryDecrypt(stored.solPrivateKeyEncrypted);
+  const btcPrivKey   = tryDecrypt(stored.btcPrivateKeyEncrypted);
+  const tronPrivKey  = tryDecrypt(stored.tronPrivateKeyEncrypted);
+  const mnemonic     = tryDecrypt(stored.mnemonicEncrypted);
+
+  // Legacy wallets (created before the export feature) have no non-XMR keys stored
+  const isLegacy = !stored.ethPrivateKeyEncrypted;
+
+  if (isLegacy) {
+    return c.json({
+      warning: "Keys created before export feature was added. Only XMR keys available. Contact support or recreate wallet.",
+      monero: {
+        address: stored.xmrAddress,
+        view_key: stored.xmrViewKey,
+        spend_key: xmrSpendKey,
+      },
+      other_chains: null,
+      note: "To recover ETH/SOL/BTC/TRX keys, recreate your wallet with POST /v1/wallet/create (this will overwrite stored XMR keys).",
+    });
+  }
+
+  return c.json({
+    warning: "Keep these keys secret. Anyone with access to a private key controls those funds.",
+    mnemonic,
+    private_keys: {
+      ethereum_and_base: ethPrivKey ? "0x" + ethPrivKey : null,
+      solana: solPrivKey,
+      bitcoin_wif: btcPrivKey,
+      tron: tronPrivKey ? "0x" + tronPrivKey : null,
+      monero_view_key: stored.xmrViewKey,
+      monero_spend_key: xmrSpendKey,
+    },
+    monero_address: stored.xmrAddress,
+    note: "ETH and Base share the same private key (EVM-compatible). Import into MetaMask, Phantom, Electrum etc to self-custody.",
+    derivation_paths: {
+      ethereum_base: "m/44'/60'/0'/0/0",
+      solana: "m/44'/501'/0'/0'",
+      bitcoin: "m/84'/0'/0'/0/0 (native segwit)",
+      tron: "m/44'/195'/0'/0/0",
+      monero: "HMAC-SHA512('monero seed', bip39_seed)",
+    },
+  });
 });
 
 export default wallet;

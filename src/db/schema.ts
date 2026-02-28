@@ -103,11 +103,16 @@ export const treasuryLedger = sqliteTable("treasury_ledger", {
   index("idx_treasury_created").on(table.createdAt),
 ]);
 
-// Wallet key storage — stores XMR keys per agent (view key plaintext, spend key AES-encrypted)
+// Wallet key storage — stores all chain keys per agent, encrypted with AES-256-GCM
 export const wallets = sqliteTable("wallets", {
   agentId: text("agent_id").primaryKey().references(() => agents.id),
   xmrAddress: text("xmr_address"),
   xmrViewKey: text("xmr_view_key"),
   xmrSpendKeyEncrypted: text("xmr_spend_key_encrypted"), // AES-256-GCM encrypted hex string
+  ethPrivateKeyEncrypted: text("eth_private_key"),       // AES-256-GCM encrypted
+  solPrivateKeyEncrypted: text("sol_private_key"),       // AES-256-GCM encrypted
+  btcPrivateKeyEncrypted: text("btc_private_key"),       // AES-256-GCM encrypted
+  tronPrivateKeyEncrypted: text("tron_private_key"),     // AES-256-GCM encrypted
+  mnemonicEncrypted: text("mnemonic_encrypted"),         // AES-256-GCM encrypted
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
 });

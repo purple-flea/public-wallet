@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS wallets (
 );
 `;
 
+
 export function runMigrations() {
   sqlite.exec(migrations);
+  // v2: add encrypted key columns to wallets — each wrapped to ignore "duplicate column" errors
+  const v2Columns = [
+    "ALTER TABLE wallets ADD COLUMN eth_private_key TEXT",
+    "ALTER TABLE wallets ADD COLUMN sol_private_key TEXT",
+    "ALTER TABLE wallets ADD COLUMN btc_private_key TEXT",
+    "ALTER TABLE wallets ADD COLUMN tron_private_key TEXT",
+    "ALTER TABLE wallets ADD COLUMN mnemonic_encrypted TEXT",
+  ];
+  for (const stmt of v2Columns) {
+    try { sqlite.exec(stmt); } catch (_) { /* column already exists */ }
+  }
 }
