@@ -1629,7 +1629,7 @@ wallet.get("/token-allowance", async (c) => {
   };
 
   const EVM_CHAINS: Record<string, string> = {
-    ethereum: "https://eth.llamarpc.com",
+    ethereum: "https://ethereum.publicnode.com",
     base: "https://mainnet.base.org",
     arbitrum: "https://arb1.arbitrum.io/rpc",
     bsc: "https://bsc-dataseed1.bnbchain.org",
@@ -1753,7 +1753,7 @@ wallet.get("/token-allowance", async (c) => {
 wallet.get("/usdc-balance", async (c) => {
   // USDC contract addresses per chain
   const USDC_CONTRACTS: Record<string, { address: string; decimals: number; rpc?: string }> = {
-    ethereum: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, rpc: "https://eth.llamarpc.com" },
+    ethereum: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, rpc: "https://ethereum.publicnode.com" },
     base: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, rpc: "https://mainnet.base.org" },
     arbitrum: { address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", decimals: 6, rpc: "https://arb1.arbitrum.io/rpc" },
     bsc: { address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", decimals: 18, rpc: "https://bsc-dataseed1.bnbchain.org" },

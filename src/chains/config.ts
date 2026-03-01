@@ -3,7 +3,7 @@ export const SUPPORTED_CHAINS = {
     name: "Ethereum",
     chainId: 1,
     nativeToken: "ETH",
-    rpcUrl: "https://eth.llamarpc.com",
+    rpcUrl: "https://ethereum.publicnode.com",
     explorer: "https://etherscan.io",
     derivationPath: "m/44'/60'/0'/0/0",
   },

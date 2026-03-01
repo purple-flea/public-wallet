@@ -5,7 +5,7 @@ const chains = new Hono();
 
 // EVM RPC endpoints for gas price checks
 const GAS_CHAINS: Record<string, { name: string; rpc: string; nativeToken: string; chainId: number }> = {
-  ethereum: { name: "Ethereum", rpc: "https://eth.llamarpc.com", nativeToken: "ETH", chainId: 1 },
+  ethereum: { name: "Ethereum", rpc: "https://ethereum.publicnode.com", nativeToken: "ETH", chainId: 1 },
   base: { name: "Base", rpc: "https://mainnet.base.org", nativeToken: "ETH", chainId: 8453 },
   arbitrum: { name: "Arbitrum", rpc: "https://arb1.arbitrum.io/rpc", nativeToken: "ETH", chainId: 42161 },
   bsc: { name: "BSC", rpc: "https://bsc-dataseed.binance.org", nativeToken: "BNB", chainId: 56 },
