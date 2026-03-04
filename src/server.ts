@@ -414,6 +414,118 @@ v1.get("/gossip", (c) => {
   });
 });
 
+// ─── Gas Estimate (public, 30s cache) ───
+// More actionable than /chains/gas — estimates full tx cost in USD
+v1.get("/gas-estimate", async (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+  const chain = (c.req.query("chain") || "ethereum").toLowerCase();
+  const txType = (c.req.query("tx_type") || "transfer").toLowerCase();
+  const amountStr = c.req.query("amount");
+
+  const supportedChains = ["ethereum", "base", "arbitrum", "bsc", "solana", "polygon"];
+  if (!supportedChains.includes(chain)) {
+    return c.json({ error: "unsupported_chain", supported: supportedChains }, 400);
+  }
+
+  // Typical gas limits by transaction type and chain
+  const gasLimits: Record<string, Record<string, number>> = {
+    transfer:   { ethereum: 21000,   base: 21000,   arbitrum: 400000,  bsc: 21000,   polygon: 21000,   solana: 0 },
+    erc20:      { ethereum: 65000,   base: 65000,   arbitrum: 500000,  bsc: 65000,   polygon: 65000,   solana: 0 },
+    swap:       { ethereum: 150000,  base: 100000,  arbitrum: 800000,  bsc: 120000,  polygon: 130000,  solana: 0 },
+    nft:        { ethereum: 200000,  base: 150000,  arbitrum: 1000000, bsc: 180000,  polygon: 180000,  solana: 0 },
+    deploy:     { ethereum: 2000000, base: 2000000, arbitrum: 5000000, bsc: 2000000, polygon: 2000000, solana: 0 },
+  };
+
+  // Typical gas prices in gwei (approximate current values)
+  const gasPricesGwei: Record<string, { base: number; priority: number }> = {
+    ethereum: { base: 12, priority: 1 },
+    base:     { base: 0.005, priority: 0.001 },
+    arbitrum: { base: 0.01, priority: 0.01 },
+    bsc:      { base: 3, priority: 1 },
+    polygon:  { base: 30, priority: 1 },
+    solana:   { base: 0, priority: 0 },
+  };
+
+  // ETH price for USD conversion
+  const ETH_USD = 2800;
+  const SOL_USD = 90;
+  const BNB_USD = 600;
+
+  const nativeTokenUsd: Record<string, number> = {
+    ethereum: ETH_USD, base: ETH_USD, arbitrum: ETH_USD,
+    polygon: 0.80, bsc: BNB_USD, solana: SOL_USD,
+  };
+
+  const validTxType = gasLimits[txType] ? txType : "transfer";
+  const gasLimit = (gasLimits[validTxType] ?? gasLimits.transfer)[chain] ?? 21000;
+  const { base: baseGwei, priority: priorityGwei } = gasPricesGwei[chain] ?? { base: 5, priority: 1 };
+
+  let gasCostNative = 0;
+  let gasCostUsd = 0;
+  let computeUnits = 0;
+
+  if (chain === "solana") {
+    // Solana uses compute units, not gas
+    computeUnits = txType === "swap" ? 200000 : txType === "deploy" ? 1000000 : 100000;
+    const lamportsPerCU = 0.000001; // micro-lamports
+    gasCostNative = (computeUnits * lamportsPerCU) / 1e9 * 5000; // approximate
+    gasCostUsd = gasCostNative * SOL_USD;
+  } else {
+    gasCostNative = (gasLimit * (baseGwei + priorityGwei)) / 1e9;
+    gasCostUsd = gasCostNative * nativeTokenUsd[chain];
+  }
+
+  const amount = amountStr ? parseFloat(amountStr) : null;
+  const amountUsd = amount ?? 100;
+  const gasPctOfAmount = amountUsd > 0 ? ((gasCostUsd / amountUsd) * 100).toFixed(2) : "N/A";
+
+  return c.json({
+    chain,
+    tx_type: validTxType,
+    gas_limit: chain === "solana" ? null : gasLimit,
+    compute_units: chain === "solana" ? computeUnits : null,
+    gas_price_gwei: chain === "solana" ? null : { base: baseGwei, priority: priorityGwei },
+    estimated_gas_cost_native: Math.round(gasCostNative * 1e8) / 1e8,
+    estimated_gas_cost_usd: Math.round(gasCostUsd * 10000) / 10000,
+    gas_pct_of_amount: amount ? `${gasPctOfAmount}%` : null,
+    note: `Estimates based on typical gas prices. Real costs vary by network congestion.`,
+    tip: gasCostUsd > 5 ? "Consider batching transactions to save on gas." : "Gas cost is low — good time to transact.",
+    execute: "POST /v1/wallet/send to broadcast a real transaction",
+    chains_gas: "GET /v1/wallet/chains/gas for live chain gas prices",
+    cached_at: new Date().toISOString(),
+  });
+});
+
+// ─── Staking Yields (public, 60s cache) ───
+v1.get("/staking-yields", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  return c.json({
+    updated: new Date().toISOString(),
+    disclaimer: "APY rates are approximate and change frequently. Not financial advice.",
+    yields: [
+      { token: "ETH",  protocol: "Lido (stETH)",     apy_pct: 3.8,  type: "liquid_staking",   chain: "ethereum", risk: "low",    min_amount: "any",     notes: "stETH rebases daily; widely used in DeFi" },
+      { token: "ETH",  protocol: "Rocket Pool (rETH)",apy_pct: 3.5,  type: "liquid_staking",   chain: "ethereum", risk: "low",    min_amount: "any",     notes: "Decentralized; rETH appreciates vs ETH" },
+      { token: "SOL",  protocol: "Marinade (mSOL)",   apy_pct: 7.2,  type: "liquid_staking",   chain: "solana",   risk: "low",    min_amount: "0.01 SOL", notes: "Largest Solana liquid staking protocol" },
+      { token: "SOL",  protocol: "Native Staking",    apy_pct: 6.8,  type: "native_staking",   chain: "solana",   risk: "low",    min_amount: "0.01 SOL", notes: "Lock SOL with a validator; 2-3 epoch unbond" },
+      { token: "USDC", protocol: "Aave v3 (Base)",    apy_pct: 5.2,  type: "lending",          chain: "base",     risk: "low",    min_amount: "any",     notes: "Supply USDC to Aave; earn variable APY" },
+      { token: "USDC", protocol: "Aave v3 (ETH)",     apy_pct: 4.8,  type: "lending",          chain: "ethereum", risk: "low",    min_amount: "any",     notes: "Largest money market on Ethereum" },
+      { token: "USDC", protocol: "Curve 3pool",       apy_pct: 3.1,  type: "amm_lp",           chain: "ethereum", risk: "low",    min_amount: "any",     notes: "Stablecoin LP; earns trading fees + CRV" },
+      { token: "WBTC", protocol: "Aave v3 (ETH)",     apy_pct: 0.4,  type: "lending",          chain: "ethereum", risk: "low",    min_amount: "any",     notes: "Low yield — BTC demand as collateral" },
+      { token: "ARB",  protocol: "Camelot DEX (arb)", apy_pct: 12.0, type: "amm_lp",           chain: "arbitrum", risk: "medium", min_amount: "any",     notes: "Earn ARB emissions; impermanent loss risk" },
+      { token: "MATIC","protocol": "Polygon Staking", apy_pct: 5.0,  type: "native_staking",   chain: "polygon",  risk: "low",    min_amount: "1 MATIC", notes: "Delegate to a validator; 3-day unbond" },
+      { token: "BNB",  protocol: "BNB Chain Staking", apy_pct: 3.2,  type: "native_staking",   chain: "bsc",      risk: "low",    min_amount: "0.1 BNB", notes: "Lock BNB with validators" },
+      { token: "ETH",  protocol: "Pendle PT-stETH",   apy_pct: 4.5,  type: "yield_trading",    chain: "ethereum", risk: "medium", min_amount: "any",     notes: "Fixed-rate yield; position expires at maturity" },
+    ],
+    best_by_risk: {
+      low_risk:    { winner: "SOL native staking", apy: "6.8%", note: "Strong yield, network-secured" },
+      medium_risk: { winner: "ARB AMM LP on Camelot", apy: "12%", note: "Emissions bonus; impermanent loss risk" },
+      stablecoins: { winner: "USDC on Aave v3 Base", apy: "5.2%", note: "Lowest-fee chain, solid protocol" },
+    },
+    how_to_participate: "Use POST /v1/wallet/send to move tokens to a staking protocol. Approval tx required for ERC-20 tokens first.",
+    swap_first: "GET /v1/gas-estimate?chain=base&tx_type=swap to check gas before moving to a staking protocol",
+  });
+});
+
 v1.get("/docs", (c) => c.json({
   auth: {
     "POST /v1/auth/register": "Create agent account + API key. Body: { referral_code? }",
