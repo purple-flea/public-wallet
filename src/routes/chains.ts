@@ -514,4 +514,88 @@ chains.get("/send-preview", async (c) => {
   });
 });
 
+// ─── Chain Health Status (public, 60s cache) ───
+
+chains.get("/health", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const EVM_CHAINS = [
+    { key: "ethereum", name: "Ethereum", rpc: "https://ethereum.publicnode.com", symbol: "ETH" },
+    { key: "base",     name: "Base",     rpc: "https://mainnet.base.org",        symbol: "ETH" },
+    { key: "arbitrum", name: "Arbitrum", rpc: "https://arb1.arbitrum.io/rpc",   symbol: "ETH" },
+    { key: "bsc",      name: "BSC",      rpc: "https://bsc-dataseed.binance.org", symbol: "BNB" },
+  ];
+
+  const SOL_RPC = "https://api.mainnet-beta.solana.com";
+  const BTC_API = "https://mempool.space/api/blocks/tip/height";
+
+  const checkEvm = async (chain: typeof EVM_CHAINS[number]) => {
+    const start = Date.now();
+    try {
+      const r = await fetch(chain.rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_blockNumber", params: [], id: 1 }),
+        signal: AbortSignal.timeout(4000),
+      });
+      const d: any = await r.json();
+      const latencyMs = Date.now() - start;
+      const blockNumber = d.result ? parseInt(d.result, 16) : null;
+      return { chain: chain.key, name: chain.name, status: blockNumber ? "online" : "degraded", block: blockNumber, latency_ms: latencyMs };
+    } catch {
+      return { chain: chain.key, name: chain.name, status: "offline", block: null, latency_ms: Date.now() - start };
+    }
+  };
+
+  const checkSolana = async () => {
+    const start = Date.now();
+    try {
+      const r = await fetch(SOL_RPC, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSlot" }),
+        signal: AbortSignal.timeout(4000),
+      });
+      const d: any = await r.json();
+      return { chain: "solana", name: "Solana", status: d.result ? "online" : "degraded", block: d.result ?? null, latency_ms: Date.now() - start };
+    } catch {
+      return { chain: "solana", name: "Solana", status: "offline", block: null, latency_ms: Date.now() - start };
+    }
+  };
+
+  const checkBitcoin = async () => {
+    const start = Date.now();
+    try {
+      const r = await fetch(BTC_API, { signal: AbortSignal.timeout(4000) });
+      const blockHeight = r.ok ? await r.json() : null;
+      return { chain: "bitcoin", name: "Bitcoin", status: blockHeight ? "online" : "degraded", block: blockHeight, latency_ms: Date.now() - start };
+    } catch {
+      return { chain: "bitcoin", name: "Bitcoin", status: "offline", block: null, latency_ms: Date.now() - start };
+    }
+  };
+
+  const results = await Promise.all([
+    ...EVM_CHAINS.map(checkEvm),
+    checkSolana(),
+    checkBitcoin(),
+  ]);
+
+  const online = results.filter(r => r.status === "online").length;
+  const total = results.length;
+  const avgLatency = Math.round(results.reduce((s, r) => s + r.latency_ms, 0) / total);
+
+  return c.json({
+    summary: {
+      chains_online: online,
+      chains_total: total,
+      overall: online === total ? "all_online" : online > total / 2 ? "degraded" : "offline",
+      avg_latency_ms: avgLatency,
+      checked_at: new Date().toISOString(),
+    },
+    chains: results,
+    supported_for_wallet: Object.keys(SUPPORTED_CHAINS),
+    tip: "Use GET /v1/wallet/chains/gas for current gas prices on EVM chains",
+  });
+});
+
 export default chains;
