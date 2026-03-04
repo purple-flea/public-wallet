@@ -56,6 +56,10 @@ check GET /favicon.ico "favicon" "" 204
 check GET /ping "ping"
 check GET "/v1/price?symbol=BTC" "BTC price (public)"
 check GET "/v1/price?symbol=ETH" "ETH price (public)"
+check GET /v1/gas "gas price oracle"
+check GET "/v1/portfolio?address=0x742d35Cc6634C0532925a3b8D4e86F91d5C9C9cB" "portfolio aggregator"
+check GET "/v1/swap/estimate?from=ETH&to=USDC&amount=1&chain=ethereum" "swap estimate"
+check GET "/v1/swap/routes?from=ETH&to=USDC&amount=1&chain=ethereum" "swap routes"
 
 echo ""
 echo "--- Auth endpoints return 401 without token ---"
