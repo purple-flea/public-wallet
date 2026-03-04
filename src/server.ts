@@ -982,6 +982,11 @@ const PURPLEFLEA_NETWORK = {
 app.get("/.well-known/purpleflea.json", (c) => c.json(PURPLEFLEA_NETWORK));
 app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
 
+// ─── Root-level aliases (crawlable, public, no auth) ───
+app.get("/leaderboard", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/leaderboard", 302); });
+app.get("/feed", (c) => { c.header("Cache-Control", "public, max-age=30"); return c.redirect("/v1/feed", 302); });
+app.get("/stats", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/public-stats", 302); });
+
 const port = parseInt(process.env.PORT || "3005", 10);
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Public Wallet v1 running on http://localhost:${info.port}`);
