@@ -392,6 +392,93 @@ v1.get("/swap/estimate", (c) => {
   });
 });
 
+// ─── Portfolio Estimate (public, 30s cache) ───
+// GET /v1/portfolio/estimate?eth=1&btc=0.1&usdc=1000&chain=ethereum
+v1.get("/portfolio/estimate", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const PRICES: Record<string, number> = {
+    BTC: 68000, ETH: 2800, SOL: 150, BNB: 580, AVAX: 35,
+    MATIC: 0.85, USDC: 1, USDT: 1,
+  };
+
+  const paramMap: Record<string, string> = {
+    eth: "ETH", btc: "BTC", usdc: "USDC", usdt: "USDT",
+    sol: "SOL", bnb: "BNB", matic: "MATIC", avax: "AVAX",
+  };
+
+  const chain = (c.req.query("chain") || "ethereum").toLowerCase();
+
+  // Build token entries from query params
+  const entries: { symbol: string; amount: number; price_usd: number; value_usd: number }[] = [];
+  for (const [param, symbol] of Object.entries(paramMap)) {
+    const raw = c.req.query(param);
+    const amount = raw !== undefined ? parseFloat(raw) : 0;
+    if (isNaN(amount) || amount < 0) {
+      return c.json({ error: "invalid_amount", message: `${param} must be a non-negative number` }, 400);
+    }
+    if (amount > 0) {
+      const price_usd = PRICES[symbol] ?? 1;
+      entries.push({ symbol, amount, price_usd, value_usd: Math.round(amount * price_usd * 100) / 100 });
+    }
+  }
+
+  const total_value_usd = Math.round(entries.reduce((s, e) => s + e.value_usd, 0) * 100) / 100;
+
+  // Allocation sorted by value descending
+  const allocation = entries
+    .map((e) => ({
+      symbol: e.symbol,
+      percentage: total_value_usd > 0 ? Math.round((e.value_usd / total_value_usd) * 10000) / 100 : 0,
+    }))
+    .sort((a, b) => b.percentage - a.percentage);
+
+  // Largest holding
+  const largest = allocation[0] ?? null;
+  const largest_holding = largest ? largest.symbol : null;
+
+  // Diversification score: 100 = perfectly spread, 0 = single asset
+  // Uses 1 - HHI (Herfindahl-Hirschman Index) normalised to 0-100
+  let diversification_score = 0;
+  if (entries.length > 1 && total_value_usd > 0) {
+    const hhi = entries.reduce((s, e) => {
+      const share = e.value_usd / total_value_usd;
+      return s + share * share;
+    }, 0);
+    const n = entries.length;
+    const hhi_min = 1 / n;
+    // Normalize: 0 when all in one asset (hhi=1), 100 when perfectly spread (hhi=1/n)
+    diversification_score = Math.round(((1 - hhi) / (1 - hhi_min)) * 100);
+  } else if (entries.length === 1) {
+    diversification_score = 0;
+  } else {
+    diversification_score = 100; // no holdings — treat as neutral
+  }
+
+  // Rebalance tip
+  let rebalance_tip = "Portfolio looks balanced.";
+  if (entries.length === 0) {
+    rebalance_tip = "No holdings provided. Add token amounts to get an estimate.";
+  } else if (entries.length === 1) {
+    rebalance_tip = `Consider diversifying - ${entries[0].symbol} is 100% of portfolio.`;
+  } else if (largest && largest.percentage >= 80) {
+    rebalance_tip = `Consider diversifying - ${largest.symbol} is ${largest.percentage}% of portfolio.`;
+  } else if (largest && largest.percentage >= 60) {
+    rebalance_tip = `${largest.symbol} dominates at ${largest.percentage}%. Mild concentration risk.`;
+  }
+
+  return c.json({
+    chain,
+    tokens: entries,
+    total_value_usd,
+    allocation,
+    largest_holding,
+    diversification_score,
+    rebalance_tip,
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Swap Route Comparison (public, no auth, 30s cache) ───
 // GET /v1/swap/routes?from=ETH&to=USDC&amount=1&chain=ethereum
 // Returns multiple DEX routes with estimated outputs so agents can compare before executing
@@ -502,6 +589,92 @@ v1.get("/swap/routes", (c) => {
     execute: "POST /v1/swap — requires auth. Use route_preference field to specify protocol.",
     also_see: "GET /v1/swap/estimate for a single-route quick estimate",
     prices_used: { [fromToken]: fromPrice, [toToken]: toPrice },
+    cached_at: new Date().toISOString(),
+  });
+});
+
+// ─── Gas Estimate (public, 30s cache) — compare chain gas costs for swaps ───
+v1.get("/gas/estimate", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const ethPrice = 2800;
+  const now = Date.now();
+  const minuteSeed = Math.floor(now / 60000);
+
+  // Simulated gas prices with realistic jitter
+  const chains = [
+    {
+      chain: "ethereum",
+      native_token: "ETH",
+      gas_gwei: Math.round((18 + (minuteSeed % 12)) * 10) / 10,
+      swap_gas_units: 150000,
+      native_price_usd: ethPrice,
+    },
+    {
+      chain: "base",
+      native_token: "ETH",
+      gas_gwei: Math.round((0.005 + (minuteSeed % 5) * 0.001) * 1000) / 1000,
+      swap_gas_units: 150000,
+      native_price_usd: ethPrice,
+    },
+    {
+      chain: "arbitrum",
+      native_token: "ETH",
+      gas_gwei: Math.round((0.1 + (minuteSeed % 8) * 0.01) * 100) / 100,
+      swap_gas_units: 800000,
+      native_price_usd: ethPrice,
+    },
+    {
+      chain: "polygon",
+      native_token: "MATIC",
+      gas_gwei: Math.round((30 + (minuteSeed % 20)) * 10) / 10,
+      swap_gas_units: 200000,
+      native_price_usd: 0.55,
+    },
+    {
+      chain: "solana",
+      native_token: "SOL",
+      gas_gwei: null,
+      swap_gas_units: null,
+      native_price_usd: 90,
+      flat_fee_usd: 0.00025,
+    },
+  ];
+
+  const results = chains.map((ch) => {
+    let gasCostUsd: number;
+    if (ch.flat_fee_usd !== undefined) {
+      gasCostUsd = ch.flat_fee_usd;
+    } else {
+      const gweiInEth = (ch.gas_gwei! * ch.swap_gas_units!) / 1e9;
+      gasCostUsd = gweiInEth * ch.native_price_usd;
+    }
+    gasCostUsd = Math.round(gasCostUsd * 10000) / 10000;
+    return {
+      chain: ch.chain,
+      native_token: ch.native_token,
+      gas_price_gwei: ch.gas_gwei,
+      estimated_swap_cost_usd: gasCostUsd,
+      cost_on_100_swap_pct: Math.round((gasCostUsd / 100) * 10000) / 100,
+      speed: ch.chain === "solana" ? "~0.4s" : ch.chain === "arbitrum" ? "~1s" : ch.chain === "base" ? "~2s" : ch.chain === "polygon" ? "~2s" : "~12s",
+      supported: ["ETH", "USDC", "WBTC"].filter(() => true),
+    };
+  }).sort((a, b) => a.estimated_swap_cost_usd - b.estimated_swap_cost_usd);
+
+  const cheapest = results[0];
+  const mostExpensive = results[results.length - 1];
+
+  return c.json({
+    service: "public-wallet",
+    description: "Estimated gas costs per chain for a standard token swap",
+    chains: results,
+    cheapest_chain: cheapest.chain,
+    most_expensive_chain: mostExpensive.chain,
+    savings_cheapest_vs_expensive_usd: Math.round((mostExpensive.estimated_swap_cost_usd - cheapest.estimated_swap_cost_usd) * 10000) / 10000,
+    tip: `Swap on ${cheapest.chain} to minimize gas. For large amounts, gas is negligible. For micro-swaps (<$5), use ${cheapest.chain}.`,
+    execute: "POST /v1/swap — specify chain in request body. Requires auth.",
+    register: "POST /v1/auth/register to get API key",
+    estimate: "GET /v1/swap/estimate?from=ETH&to=USDC&amount=1 for output estimate",
     cached_at: new Date().toISOString(),
   });
 });
@@ -1338,6 +1511,7 @@ app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
 app.get("/leaderboard", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/leaderboard", 302); });
 app.get("/feed", (c) => { c.header("Cache-Control", "public, max-age=30"); return c.redirect("/v1/feed", 302); });
 app.get("/stats", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/public-stats", 302); });
+app.get("/portfolio", (c) => { c.header("Cache-Control", "public, max-age=30"); return c.redirect("/v1/portfolio/estimate", 302); });
 
 const port = parseInt(process.env.PORT || "3005", 10);
 serve({ fetch: app.fetch, port }, (info) => {
