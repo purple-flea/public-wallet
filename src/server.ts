@@ -1051,6 +1051,226 @@ v1.get("/defi/rates", (c) => {
   });
 });
 
+// ─── Gas History (public, 60s cache) ───
+// Returns simulated 24h gas price trends across major chains
+const gasHistoryCache: { data: unknown; ts: number } = { data: null, ts: 0 };
+
+v1.get("/gas/history", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const now = Date.now();
+  if (gasHistoryCache.data && now - gasHistoryCache.ts < 60_000) {
+    return c.json(gasHistoryCache.data);
+  }
+
+  const minuteSeed = Math.floor(now / 60000);
+
+  // Deterministic pseudo-random based on seed + chain offset
+  const rng = (seed: number, offset: number) => {
+    const h = Math.abs((seed * 1664525 + offset * 22695477 + 1013904223) & 0x7fffffff);
+    return h / 0x7fffffff;
+  };
+
+  type ChainGasInfo = {
+    current_gwei: number;
+    "1h_avg": number;
+    "4h_avg": number;
+    "24h_avg": number;
+    "24h_low": number;
+    "24h_high": number;
+    trend: string;
+    recommendation: string;
+  };
+
+  type ChainSpec = {
+    offset: number;
+    min: number;
+    max: number;
+    typical: number;
+  };
+
+  const chainSpecs: Record<string, ChainSpec> = {
+    ethereum: { offset: 1,  min: 8,     max: 50,    typical: 18   },
+    arbitrum: { offset: 2,  min: 0.01,  max: 0.1,   typical: 0.04 },
+    base:     { offset: 3,  min: 0.001, max: 0.05,  typical: 0.01 },
+    polygon:  { offset: 4,  min: 30,    max: 200,   typical: 80   },
+    bsc:      { offset: 5,  min: 3,     max: 10,    typical: 5    },
+  };
+
+  const chains: Record<string, ChainGasInfo> = {};
+  let lowestGwei = Infinity;
+  let bestChain = "arbitrum";
+
+  for (const [chain, spec] of Object.entries(chainSpecs)) {
+    const range = spec.max - spec.min;
+
+    // Current: oscillates within range using seed
+    const currentRaw = spec.min + rng(minuteSeed, spec.offset) * range;
+    const current_gwei = Math.round(currentRaw * 1000) / 1000;
+
+    // 1h avg: slightly different seed
+    const avg1h = Math.round((spec.min + rng(minuteSeed + 10, spec.offset) * range) * 1000) / 1000;
+
+    // 4h avg: more variation
+    const avg4h = Math.round((spec.min + rng(minuteSeed + 100, spec.offset) * range) * 1000) / 1000;
+
+    // 24h avg: closer to typical
+    const avg24h = Math.round((spec.typical * 0.7 + rng(minuteSeed + 1000, spec.offset) * spec.typical * 0.6) * 1000) / 1000;
+
+    // 24h low/high
+    const low24h  = Math.round((spec.min + rng(minuteSeed + 2000, spec.offset) * range * 0.3) * 1000) / 1000;
+    const high24h = Math.round((spec.typical + rng(minuteSeed + 3000, spec.offset) * (spec.max - spec.typical)) * 1000) / 1000;
+
+    // Trend: compare current vs 4h avg
+    const trendDiff = current_gwei - avg4h;
+    let trend: string;
+    let recommendation: string;
+    if (trendDiff < -avg4h * 0.05) {
+      trend = "falling";
+      recommendation = "Good time to transact";
+    } else if (trendDiff > avg4h * 0.1) {
+      trend = "rising";
+      recommendation = "Consider waiting for lower gas";
+    } else {
+      trend = "stable";
+      recommendation = "Normal conditions";
+    }
+
+    chains[chain] = {
+      current_gwei,
+      "1h_avg": avg1h,
+      "4h_avg": avg4h,
+      "24h_avg": avg24h,
+      "24h_low": low24h,
+      "24h_high": high24h,
+      trend,
+      recommendation,
+    };
+
+    if (current_gwei < lowestGwei) {
+      lowestGwei = current_gwei;
+      bestChain = chain;
+    }
+  }
+
+  const result = {
+    generated_at: new Date(now).toISOString(),
+    chains,
+    best_time_to_transact: bestChain,
+    note: "Gas prices simulated — use on-chain oracles for real execution",
+  };
+
+  gasHistoryCache.data = result;
+  gasHistoryCache.ts = now;
+
+  return c.json(result);
+});
+
+// ─── Trending Tokens (public, 60s cache) ───
+// Returns trending tokens by simulated agent interest/watchlist activity
+const trendingCache: { data: unknown; ts: number } = { data: null, ts: 0 };
+
+v1.get("/tokens/trending", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const now = Date.now();
+  if (trendingCache.data && now - trendingCache.ts < 60_000) {
+    return c.json(trendingCache.data);
+  }
+
+  const minuteSeed = Math.floor(now / 60000);
+
+  const rng = (seed: number, offset: number) => {
+    const h = Math.abs((seed * 1664525 + offset * 22695477 + 1013904223) & 0x7fffffff);
+    return h / 0x7fffffff;
+  };
+
+  type TokenSpec = {
+    symbol: string;
+    name: string;
+    basePrice: number;
+    category: string;
+    baseWatches: number;
+    baseSwaps: number;
+  };
+
+  const tokenSpecs: TokenSpec[] = [
+    { symbol: "ETH",  name: "Ethereum",       basePrice: 3241.50, category: "layer1",   baseWatches: 47, baseSwaps: 12 },
+    { symbol: "BTC",  name: "Bitcoin",         basePrice: 68420,   category: "layer1",   baseWatches: 52, baseSwaps: 8  },
+    { symbol: "SOL",  name: "Solana",          basePrice: 152.30,  category: "layer1",   baseWatches: 38, baseSwaps: 15 },
+    { symbol: "USDC", name: "USD Coin",        basePrice: 1.00,    category: "stablecoin", baseWatches: 35, baseSwaps: 22 },
+    { symbol: "ARB",  name: "Arbitrum",        basePrice: 1.12,    category: "layer2",   baseWatches: 29, baseSwaps: 9  },
+    { symbol: "OP",   name: "Optimism",        basePrice: 2.18,    category: "layer2",   baseWatches: 24, baseSwaps: 7  },
+    { symbol: "MATIC",name: "Polygon",         basePrice: 0.87,    category: "layer2",   baseWatches: 21, baseSwaps: 6  },
+    { symbol: "LINK", name: "Chainlink",       basePrice: 15.40,   category: "oracle",   baseWatches: 18, baseSwaps: 5  },
+    { symbol: "DOGE", name: "Dogecoin",        basePrice: 0.132,   category: "meme",     baseWatches: 16, baseSwaps: 4  },
+    { symbol: "AVAX", name: "Avalanche",       basePrice: 36.80,   category: "layer1",   baseWatches: 14, baseSwaps: 3  },
+  ];
+
+  const trending = tokenSpecs.map((spec, i) => {
+    const offset = i + 1;
+
+    // Price jitter: ±5%
+    const priceJitter = (rng(minuteSeed, offset * 10) - 0.5) * 0.1;
+    const price_usd = spec.symbol === "USDC"
+      ? 1.00
+      : Math.round(spec.basePrice * (1 + priceJitter) * 100) / 100;
+
+    // 24h change: ±12%
+    const change_24h_pct = spec.symbol === "USDC"
+      ? 0.0
+      : Math.round((rng(minuteSeed, offset * 7) * 24 - 12) * 10) / 10;
+
+    // Agent activity: jitter watches and swaps
+    const agent_watches = Math.max(1, Math.round(spec.baseWatches * (0.8 + rng(minuteSeed, offset * 3) * 0.4)));
+    const agent_swaps_1h = Math.max(0, Math.round(spec.baseSwaps * (0.7 + rng(minuteSeed, offset * 5) * 0.6)));
+
+    // Trend score: weighted combination
+    const trend_score = Math.min(100, Math.round(
+      agent_watches * 0.5 +
+      agent_swaps_1h * 2 +
+      Math.abs(change_24h_pct) * 1.5
+    ));
+
+    return {
+      rank: i + 1,
+      symbol: spec.symbol,
+      name: spec.name,
+      price_usd,
+      change_24h_pct,
+      agent_watches,
+      agent_swaps_1h,
+      trend_score,
+      category: spec.category,
+    };
+  });
+
+  // Sort by trend_score descending and re-rank
+  trending.sort((a, b) => b.trend_score - a.trend_score);
+  trending.forEach((t, i) => { t.rank = i + 1; });
+
+  // Movers: biggest gainer / loser (exclude stablecoins)
+  const nonStable = trending.filter(t => t.category !== "stablecoin");
+  const sorted24h = [...nonStable].sort((a, b) => b.change_24h_pct - a.change_24h_pct);
+  const biggest_gainer = sorted24h[0];
+  const biggest_loser  = sorted24h[sorted24h.length - 1];
+
+  const result = {
+    generated_at: new Date(now).toISOString(),
+    window: "1h",
+    trending,
+    movers: {
+      biggest_gainer: { symbol: biggest_gainer.symbol, change_24h_pct: biggest_gainer.change_24h_pct },
+      biggest_loser:  { symbol: biggest_loser.symbol,  change_24h_pct: biggest_loser.change_24h_pct  },
+    },
+  };
+
+  trendingCache.data = result;
+  trendingCache.ts = now;
+
+  return c.json(result);
+});
+
 v1.get("/docs", (c) => c.json({
   auth: {
     "POST /v1/auth/register": "Create agent account + API key. Body: { referral_code? }",
