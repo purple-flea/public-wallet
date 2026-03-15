@@ -3,7 +3,7 @@ module.exports = {
     {
       name: "public-wallet",
       script: "dist/server.js",
-      cwd: "/home/dev/public-wallet",
+      cwd: "/home/dev/wallet",
       interpreter: "node",
       env: {
         NODE_ENV: "production",
