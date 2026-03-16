@@ -4,6 +4,7 @@
   "description": "Public multi-chain wallet API for AI agents. Non-custodial HD wallets, on-chain balances, send, and cross-chain swaps via Wagyu.",
   "type": "module",
   "scripts": {
+    "postinstall": "npm rebuild",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"
