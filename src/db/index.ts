@@ -96,6 +96,6 @@ export function runMigrations() {
     "ALTER TABLE wallets ADD COLUMN mnemonic_encrypted TEXT",
   ];
   for (const stmt of v2Columns) {
-    try { sqlite.exec(stmt); } catch (_) { /* column already exists */ }
+    try { sqlite.exec(stmt); } catch (e: any) { if (!e.message?.includes("duplicate column") && !e.message?.includes("already exists")) throw e; }
   }
 }

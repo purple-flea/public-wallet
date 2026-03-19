@@ -91,15 +91,18 @@ referral.post("/withdraw", async (c) => {
     .where(eq(schema.referralWithdrawals.referrerId, agentId))
     .all();
   const totalWithdrawn = withdrawals
-    .filter((w) => w.status === "completed" || w.status === "pending")
+    .filter((w) => w.status === "completed")
     .reduce((sum, w) => sum + w.amount, 0);
-
-  const available = totalEarned - totalWithdrawn;
+  const totalPending = withdrawals
+    .filter((w) => w.status === "pending")
+    .reduce((sum, w) => sum + w.amount, 0);
+  const available = totalEarned - totalWithdrawn - totalPending;
 
   if (available < 1.0) {
     return c.json({
       error: "insufficient_balance",
       available_usd: Math.round(available * 100) / 100,
+      pending_usd: Math.round(totalPending * 100) / 100,
       minimum: 1.0,
       message: "Minimum withdrawal is $1.00",
     }, 400);
